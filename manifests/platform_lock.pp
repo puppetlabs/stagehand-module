@@ -323,7 +323,7 @@ class stagehand::platform_lock (
     $package_after = $package_versions.keys.map |String $name| { Package["stagehand-platform-lock-${name}"] }
     $lock_after = $facts['os']['family'] ? {
       'Debian' => $package_versions.keys.map |String $name| { Exec["stagehand-platform-lock-apt-${name}"] },
-      'RedHat' => [Exec['stagehand-platform-lock-dnf-versionlock']],
+      'RedHat' => [File['/etc/dnf/plugins/versionlock.list']],
       'Suse'   => $package_versions.keys.map |String $name| { Exec["stagehand-platform-lock-zypper-${name}"] },
       default  => [],
     }
