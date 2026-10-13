@@ -105,6 +105,17 @@ describe 'stagehand::webhook' do
           expect(content).to include("timeout: '15m'")
           expect(content).to include("state_dir: '/var/lib/webhook-go'")
           expect(content).to include('output_limit: 262144')
+          expect(content).to include('max_jobs: 500')
+        end
+
+        it 'creates the state directory 0700, owned by the service user (root, per the unit)' do
+          is_expected.to contain_file('/var/lib/webhook-go').with(
+            ensure: 'directory', owner: 'root', group: 'root', mode: '0700',
+          )
+        end
+
+        it 'has the state directory in place before the service starts' do
+          is_expected.to contain_service('webhook-go').that_requires('File[/var/lib/webhook-go]')
         end
 
         it 'keeps the service running and enabled' do
@@ -168,6 +179,37 @@ describe 'stagehand::webhook' do
 
       context 'with a crl_path containing a control character' do
         let(:params) { super().merge('crl_path' => "/etc/pki/stagehand/ca\tcrl.pem") }
+
+        it { is_expected.to compile.and_raise_error(%r{control character}) }
+      end
+
+      context 'with a custom state_dir and max_jobs' do
+        let(:params) { super().merge('state_dir' => '/srv/webhook-go/state', 'max_jobs' => 50) }
+
+        it 'creates that directory and renders both keys' do
+          is_expected.to contain_file('/srv/webhook-go/state').with(ensure: 'directory', owner: 'root', mode: '0700')
+          is_expected.to contain_service('webhook-go').that_requires('File[/srv/webhook-go/state]')
+          content = content_of(webhook_yml)
+          expect(content).to include("state_dir: '/srv/webhook-go/state'")
+          expect(content).to include('max_jobs: 50')
+          expect(content).not_to include('/var/lib/webhook-go')
+        end
+      end
+
+      context 'with max_jobs below 1' do
+        let(:params) { super().merge('max_jobs' => 0) }
+
+        it { is_expected.to compile.and_raise_error(%r{max_jobs}) }
+      end
+
+      context 'with a relative state_dir' do
+        let(:params) { super().merge('state_dir' => 'var/lib/webhook-go') }
+
+        it { is_expected.to compile.and_raise_error(%r{state_dir}) }
+      end
+
+      context 'with a state_dir containing a control character' do
+        let(:params) { super().merge('state_dir' => "/var/lib/webhook\tgo") }
 
         it { is_expected.to compile.and_raise_error(%r{control character}) }
       end
