@@ -37,6 +37,7 @@ Hiera into the k3s manifests directory for k3s to reconcile.
 * [`Stagehand::Docker_image_ref`](#Stagehand--Docker_image_ref): A fully-qualified, digest-pinned Docker image reference.
 * [`Stagehand::K3s::Sizing_tier`](#Stagehand--K3s--Sizing_tier): The appliance's operator-chosen sizing tier for a k3s-hosted
 Console deployment.
+* [`Stagehand::Sha256_fingerprint`](#Stagehand--Sha256_fingerprint): A certificate's SHA-256 fingerprint in colon hex.
 
 ### Tasks
 
@@ -1295,8 +1296,13 @@ code-deploy tool at all (Phase 57.6 D-31), one agent run:
      over mutual TLS: the server identity is this node's own Puppet
      certificate and key (D-11), clients must present a certificate signed by
      this estate's CA, not revoked in its CRL, and named on
-     `allowed_certnames`;
-  5. keeps the `webhook-go` service running, restarting it whenever its
+     `allowed_certnames`. On the CA host the CRL is the CA's own
+     `ca_crl.pem`, which a revocation updates at once;
+  5. creates the fork's state directory (job records and the deploy lock)
+     with mode 0700, and a systemd drop-in so stopping the service lets the
+     fork kill a running engine and write its records, and a reload never
+     sends SIGHUP;
+  6. keeps the `webhook-go` service running, restarting it whenever its
      config or its package changes.
 
 **Runs as root (MD-04).** The fork's systemd unit has no `User=`, like
@@ -1341,6 +1347,7 @@ The following parameters are available in the `stagehand::webhook` class:
 * [`webhook_package_sha256`](#-stagehand--webhook--webhook_package_sha256)
 * [`allowed_certnames`](#-stagehand--webhook--allowed_certnames)
 * [`allowed_fingerprints`](#-stagehand--webhook--allowed_fingerprints)
+* [`crl_path`](#-stagehand--webhook--crl_path)
 * [`engine`](#-stagehand--webhook--engine)
 * [`g10k_command_path`](#-stagehand--webhook--g10k_command_path)
 * [`r10k_version`](#-stagehand--webhook--r10k_version)
@@ -1349,6 +1356,8 @@ The following parameters are available in the `stagehand::webhook` class:
 * [`basedir`](#-stagehand--webhook--basedir)
 * [`port`](#-stagehand--webhook--port)
 * [`deploy_timeout`](#-stagehand--webhook--deploy_timeout)
+* [`state_dir`](#-stagehand--webhook--state_dir)
+* [`max_jobs`](#-stagehand--webhook--max_jobs)
 * [`manage_git`](#-stagehand--webhook--manage_git)
 * [`git_ssh_host`](#-stagehand--webhook--git_ssh_host)
 * [`git_ssh_key`](#-stagehand--webhook--git_ssh_key)
@@ -1391,14 +1400,31 @@ Default value: `['stagehand-code-manager']`
 
 ##### <a name="-stagehand--webhook--allowed_fingerprints"></a>`allowed_fingerprints`
 
-Data type: `Array[Pattern[/\A[0-9A-F]{2}(:[0-9A-F]{2}){31}\z/]]`
+Data type: `Array[Stagehand::Sha256_fingerprint]`
 
-Optional pin: SHA-256 fingerprints (uppercase, colon-separated, as printed
-by `puppetserver ca list --all` or `openssl x509 -fingerprint -sha256`) of
-the exact client certificates allowed. Empty means any certificate with an
-allowed certname passes.
+Optional pin: SHA-256 fingerprints of the exact client certificates
+allowed, as 32 colon-separated hex pairs: the `(SHA256)` value
+`puppetserver ca list --all` prints (copy the hex only, not the label).
+Lower case is accepted; entries are rendered in upper case, once each.
+Anything else (a SHA-1 fingerprint, hex without colons) fails the catalog.
+Empty means any certificate with an allowed certname passes.
 
 Default value: `[]`
+
+##### <a name="-stagehand--webhook--crl_path"></a>`crl_path`
+
+Data type: `Optional[Stdlib::Unixpath]`
+
+Certificate revocation list the fork checks every client certificate
+against. Default (undef): on the CA host (the `stagehand_puppetserver_ca`
+fact), the CA's own `/etc/puppetlabs/puppetserver/ca/ca_crl.pem`, which
+changes the moment `puppetserver ca revoke` runs; on any other node, the
+agent's copy `/etc/puppetlabs/puppet/ssl/crl.pem`. The agent copy is only
+refreshed on agent runs, so a revocation reaches it late. Set this on a CA
+with a non-default `cadir`. The fork rereads the file within a minute of a
+change.
+
+Default value: `undef`
 
 ##### <a name="-stagehand--webhook--engine"></a>`engine`
 
@@ -1468,6 +1494,27 @@ Longest a single environment deploy may run before the fork kills it, as a
 Go duration such as `15m` or `1h`.
 
 Default value: `'15m'`
+
+##### <a name="-stagehand--webhook--state_dir"></a>`state_dir`
+
+Data type: `Stdlib::Unixpath`
+
+The fork's state directory (`deploys.state_dir`): job records
+(`jobs/<id>.json`), the cross-process deploy lock and one lock file per
+running process (`instances/`). The class creates it with mode 0700, owned
+by root, the user the service runs as (its unit has no `User=`).
+
+Default value: `'/var/lib/webhook-go'`
+
+##### <a name="-stagehand--webhook--max_jobs"></a>`max_jobs`
+
+Data type: `Integer[1]`
+
+How many job records the fork keeps (`deploys.max_jobs`); the oldest
+finished ones beyond this are deleted, and their ids then answer 404. At
+least 1. Default 500, the fork's own default.
+
+Default value: `500`
 
 ##### <a name="-stagehand--webhook--manage_git"></a>`manage_git`
 
@@ -1677,6 +1724,18 @@ type-name segments verbatim, underscores preserved, only the first
 letter capitalized.
 
 Alias of `Enum['small', 'medium', 'large']`
+
+### <a name="Stagehand--Sha256_fingerprint"></a>`Stagehand::Sha256_fingerprint`
+
+32 hex pairs joined by colons, the `(SHA256)` value `puppetserver ca list
+--all` prints and the form `openssl x509 -noout -fingerprint -sha256` gives
+after its `sha256 Fingerprint=` label, for example
+`5B:9A:0C:...:3D:B5`. Copy only the hex: the `(SHA256)` label, a SHA-1
+fingerprint (20 pairs), bare hex without colons and any surrounding
+whitespace are refused. Lower case is accepted, as the webhook-go fork
+accepts it; `stagehand::webhook` renders every entry in upper case.
+
+Alias of `Pattern[/\A[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){31}\z/]`
 
 ## Tasks
 

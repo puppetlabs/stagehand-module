@@ -18,8 +18,13 @@
 #      over mutual TLS: the server identity is this node's own Puppet
 #      certificate and key (D-11), clients must present a certificate signed by
 #      this estate's CA, not revoked in its CRL, and named on
-#      `allowed_certnames`;
-#   5. keeps the `webhook-go` service running, restarting it whenever its
+#      `allowed_certnames`. On the CA host the CRL is the CA's own
+#      `ca_crl.pem`, which a revocation updates at once;
+#   5. creates the fork's state directory (job records and the deploy lock)
+#      with mode 0700, and a systemd drop-in so stopping the service lets the
+#      fork kill a running engine and write its records, and a reload never
+#      sends SIGHUP;
+#   6. keeps the `webhook-go` service running, restarting it whenever its
 #      config or its package changes.
 #
 # **Runs as root (MD-04).** The fork's systemd unit has no `User=`, like

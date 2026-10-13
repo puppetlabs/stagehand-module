@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - feat(stagehand::webhook): prepare a Puppet Core primary for the Advanced Code Manager pack -- installs git and r10k (`puppet_gem`; 5.0.3 on Puppet 8, 4.1.0 on Puppet 7), writes `r10k.yaml`, installs the Stagehand webhook-go fork from a pinned HTTPS URL with a mandatory sha256, and configures its mutual-TLS deploy API on the primary's own Puppet certificate with a certname allow-list, optional fingerprint pins and the CA's CRL; SSH control repositories get a root ssh Host block with a pinned host key and `StrictHostKeyChecking yes`. Guide with human test steps: `docs/stagehand-webhook.md`.
+- feat(stagehand::webhook): fork hardening hand-off -- on the CA host `server.tls.crl` defaults to the CA's own `/etc/puppetlabs/puppetserver/ca/ca_crl.pem` (new `stagehand_puppetserver_ca` fact; new `crl_path` override), because the agent's `crl.pem` only refreshes on agent runs; `allowed_fingerprints` takes the colon-hex SHA-256 form `puppetserver ca list --all` prints, in either case, validated by the new `Stagehand::Sha256_fingerprint` type and rendered upper case; new `state_dir` (created 0700, root) and `max_jobs` (default 500) parameters; a systemd drop-in for `webhook-go` sets `KillMode=mixed`, `TimeoutStopSec=60` and an empty `ExecReload=` so a reload never sends SIGHUP.
 
 ## [1.0.0] - 2026-08-25
 

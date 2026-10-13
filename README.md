@@ -45,8 +45,11 @@ process — read it before cutting a tag.
   `r10k.yaml`, installs the Stagehand fork of webhook-go from a pinned HTTPS
   URL whose sha256 must match, and configures it for mutual TLS with the
   primary's own Puppet certificate: only clients signed by the estate's CA,
-  not revoked, and named on `allowed_certnames` (default
-  `stagehand-code-manager`) may deploy. SSH control repositories get a
+  not revoked (on the CA host it reads the CA's own `ca_crl.pem`), and named
+  on `allowed_certnames` (default `stagehand-code-manager`) may deploy,
+  optionally pinned by SHA-256 fingerprint. It also creates the fork's 0700
+  state directory and a systemd drop-in (`KillMode=mixed`,
+  `TimeoutStopSec=60`, no `ExecReload`). SSH control repositories get a
   root-only ssh Host block with a pinned host key. Runs as root. Minimal use:
 
   ```yaml

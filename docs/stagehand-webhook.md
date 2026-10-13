@@ -40,7 +40,11 @@ deploy reporting added), writes its settings, and keeps it running.
 | Mutual TLS (mTLS) | An encrypted connection where *both* sides show a certificate, not only the server. |
 | Certname | The name inside a Puppet certificate, for example `stagehand-code-manager`. |
 | CRL | Certificate revocation list: the CA's list of certificates it has cancelled. |
+| CA host | The server that runs the certificate authority. On a standard Puppet Core install this is the primary itself. |
 | sha256 digest | A 64-character fingerprint of a file. If even one byte changes, the digest changes. |
+| Certificate fingerprint | The same idea for a certificate: its SHA-256 digest, written as 32 pairs of hex characters joined by colons (`5B:9A:...:B5`). |
+| State directory | The folder where webhook-go keeps its notes about each deploy (job records) and the lock that stops two deploys running at once. |
+| systemd drop-in | A small extra settings file that changes how Linux starts and stops a service, without editing the service's own file. |
 
 ## Before you start
 
@@ -111,8 +115,14 @@ stagehand::webhook::git_ssh_known_host: 'github.com ssh-ed25519 <host key>'
 # Who may call the deploy API (default shown)
 stagehand::webhook::allowed_certnames:
   - 'stagehand-code-manager'
-# Optional extra pin on the exact certificate (default: empty list)
+# Optional extra pin on the exact certificate (default: empty list).
+# Format: the (SHA256) value from `puppetserver ca list --all`, see Step 5.
 stagehand::webhook::allowed_fingerprints: []
+# stagehand::webhook::allowed_fingerprints:
+#   - '5B:9A:0C:41:7E:D2:13:88:6F:A4:20:C9:3B:E7:51:0D:94:2A:C6:7F:18:B3:E0:5D:72:9C:4E:A1:06:F8:3D:B5'
+
+# Revocation list (default: chosen for you, see Step 5)
+# stagehand::webhook::crl_path: '/etc/puppetlabs/puppetserver/ca/ca_crl.pem'
 
 # Defaults; change only if you know you need to
 stagehand::webhook::engine: 'r10k'                # or 'g10k' with g10k_command_path
@@ -123,6 +133,8 @@ stagehand::webhook::cachedir: '/opt/puppetlabs/puppet/cache/r10k'
 stagehand::webhook::basedir: '/etc/puppetlabs/code/environments'
 stagehand::webhook::port: 8088
 stagehand::webhook::deploy_timeout: '15m'
+stagehand::webhook::state_dir: '/var/lib/webhook-go'  # created 0700, owned by root
+stagehand::webhook::max_jobs: 500                     # deploy records kept
 stagehand::webhook::manage_git: true
 ```
 
@@ -183,13 +195,31 @@ could get that name. Exclude it from autosigning.
 Two extra protections:
 
 - **Pin the exact certificate.** After signing, print its fingerprint with
-  `sudo puppetserver ca list --all` (the `(SHA256)` value) and put it in
-  `allowed_fingerprints`. Then even a second certificate with the same name is
-  refused.
+  `sudo puppetserver ca list --all`. The line for `stagehand-code-manager`
+  shows `(SHA256)` followed by 32 pairs of characters joined by colons. Copy
+  only those pairs (not the `(SHA256)` label) into `allowed_fingerprints`.
+  Then even a second certificate with the same name is refused.
+  - Lower case is fine; the class writes every entry in upper case.
+  - Puppet refuses the catalog, naming `allowed_fingerprints`, if an entry is
+    not exactly 32 colon-separated pairs. That catches a SHA-1 fingerprint
+    (20 pairs), hex without colons, the label left on, or a stray space.
+  - When the pack's certificate is re-issued, its fingerprint changes. Update
+    the list, or the new certificate is refused.
 - **Revoke when needed.** `sudo puppetserver ca revoke --certname
-  stagehand-code-manager` cancels it. The fork reads the CA's revocation list
-  (`/etc/puppetlabs/puppet/ssl/crl.pem`) and refuses revoked certificates once
-  the primary's copy of the list updates.
+  stagehand-code-manager` cancels it. The fork rereads its revocation list
+  within a minute of the file changing, and then refuses that certificate.
+  Which file it reads matters:
+  - **On the CA host** (normally the primary), the class points the fork at
+    the CA's own list, `/etc/puppetlabs/puppetserver/ca/ca_crl.pem`. The
+    revoke command updates that file immediately, so the refusal follows
+    within a minute.
+  - **On any other node**, it uses the agent's copy,
+    `/etc/puppetlabs/puppet/ssl/crl.pem`. That copy is only refreshed when the
+    Puppet agent runs, so a revoked certificate can keep deploying until the
+    next agent run. Run `sudo puppet agent -t` after revoking.
+  - The class decides with a fact, `stagehand_puppetserver_ca`, which is
+    `true` when `ca_crl.pem` exists at that path. If your CA keeps its files
+    somewhere else (a custom `cadir`), set `crl_path` to its CRL.
 
 The console's Certificates page can approve this request for you **only when
 this Core estate is the console's active instance**. Otherwise, use the
@@ -202,6 +232,37 @@ the Puppet code directory, and the service has to read this primary's Puppet
 private key to prove who it is. To keep that safe, only callers with an allowed
 certificate can reach it, environment names are checked before use, and r10k is
 started directly, never through a shell.
+
+## Where it keeps its records, and how it stops
+
+**State directory.** webhook-go writes a small record for every deploy into
+`state_dir` (default `/var/lib/webhook-go`), so a deploy's result can still be
+read after a restart. The same folder holds the lock that makes sure only one
+deploy runs at a time. The class creates the folder with mode `0700`, owned by
+root, because the service runs as root and nobody else needs to read it. The
+newest `max_jobs` records (default 500) are kept; older finished ones are
+deleted.
+
+**Stopping and reloading.** The class adds a systemd drop-in,
+`/etc/systemd/system/webhook-go.service.d/50-stagehand.conf`, with three
+settings. In plain words:
+
+- `KillMode=mixed`: when the service is stopped, systemd first asks only
+  webhook-go to stop (SIGTERM). webhook-go then stops any deploy in progress,
+  including r10k and the git commands it started, and writes down that the
+  deploy was cut short. Upstream's unit would leave r10k running on its own.
+- `TimeoutStopSec=60`: if anything is still running a minute later, systemd
+  ends it by force. webhook-go itself needs at most 30 seconds.
+- `ExecReload=` (empty): upstream's "reload" command is broken. It sends a
+  signal to a process number systemd never fills in, so it does nothing. If it
+  did work, the signal (SIGHUP) would end webhook-go at once, skipping the
+  careful stop above. The empty line removes it, so
+  `systemctl reload webhook-go` is refused. To apply new settings, restart the
+  service; Puppet does that for you whenever `webhook.yml` changes.
+
+A deploy that was running when the service stopped is reported as failed
+(`interrupted by a restart` or `... shutting down`). r10k may have been
+stopped part-way, so deploy that environment again.
 
 ## What the pack sends (for troubleshooting)
 
@@ -225,7 +286,11 @@ A deploy request looks like this:
 - `expected_sha` is required for every environment: it is the commit the pack
   expects to see live afterwards. A deploy whose result does not match is
   reported as failed (`deployed <x>, expected <y>`), not as deployed.
-- `wait` must be `true` for now: the request waits until r10k has finished.
+- `wait` must be `true` or `false`. With `true`, the request waits until
+  r10k has finished. With `false`, it answers at once (`202`) with the
+  deploy's id, and the pack then reads `GET /api/v1/deploys/<id>` until the
+  deploy is `deployed` or `failed`. Ids are 32 hex characters; treat them as
+  opaque.
 
 Each result says `deployed` only if r10k exited 0 **and** rewrote the
 environment's `.r10k-deploy.json` marker during this run with
@@ -245,6 +310,10 @@ names the first thing that was wrong, for example `engine exited 1`,
 | Root's ssh config has more than one `Match all` line | The Include step fails on purpose. Leave one `Match all` line, then run the agent again. |
 | git says "detected dubious ownership" | The code directory belongs to another user. Run `sudo git config --global --add safe.directory '*'` only if you accept that, or give root ownership of the code directory. |
 | A client is refused | Its certname is not in `allowed_certnames`, its fingerprint is not pinned in `allowed_fingerprints`, or it is revoked. |
+| The agent run fails naming `allowed_fingerprints` | An entry is not 32 colon-separated hex pairs. Copy only the pairs after `(SHA256)` from `puppetserver ca list --all`. |
+| A revoked certificate can still deploy | Check the `crl:` line in `/etc/voxpupuli/webhook.yml`. If it is the agent copy (`/etc/puppetlabs/puppet/ssl/crl.pem`), run `sudo puppet agent -t` to refresh it, or set `crl_path` to the CA's file if this node is the CA host with a custom `cadir`. |
+| `systemctl reload webhook-go` fails with "Job type reload is not applicable" | Expected: reload is switched off on purpose. Use `sudo systemctl restart webhook-go`. |
+| A deploy reads `interrupted by a restart` | The service stopped or the server restarted mid-deploy. Deploy that environment again. |
 
 ## Human test steps
 
@@ -286,4 +355,29 @@ you should see.
 10. Revoke the pack's certificate (`sudo puppetserver ca revoke --certname
     stagehand-code-manager`), wait a minute, and try another deploy.
     **Expect:** the deploy is refused. Re-issue and re-sign the certificate
-    afterwards to restore access.
+    afterwards to restore access (and update `allowed_fingerprints` if you
+    pinned it).
+11. On the CA host, run `sudo grep 'crl:' /etc/voxpupuli/webhook.yml`.
+    **Expect:** `crl: '/etc/puppetlabs/puppetserver/ca/ca_crl.pem'`. On a
+    primary that is not the CA host, expect the agent copy
+    `/etc/puppetlabs/puppet/ssl/crl.pem`.
+12. Run `sudo ls -ld /var/lib/webhook-go` and
+    `sudo grep max_jobs /etc/voxpupuli/webhook.yml`.
+    **Expect:** `drwx------` owned by `root root`; `max_jobs: 500`.
+13. Run `systemctl show webhook-go -p KillMode -p TimeoutStopUSec -p ExecReload`
+    and `systemctl cat webhook-go`.
+    **Expect:** `KillMode=mixed`, `TimeoutStopUSec=1min`, an empty
+    `ExecReload=`, and the drop-in
+    `/etc/systemd/system/webhook-go.service.d/50-stagehand.conf` listed after
+    the unit with its explanatory comments.
+14. Run `sudo systemctl reload webhook-go`, then `systemctl status webhook-go`.
+    **Expect:** the reload is refused ("Job type reload is not applicable for
+    unit"), and the service is still `active (running)` with the same main PID
+    as before.
+15. Start a deploy from the pack, and while it is still running, run
+    `sudo systemctl restart webhook-go`. Then run
+    `pgrep -af 'r10k|git'`.
+    **Expect:** the restart finishes within a minute, no r10k or git process
+    from that deploy is left running, and the deploy reads failed with
+    `engine stopped: the deploy service is shutting down` or
+    `interrupted by a restart`. Deploy again afterwards.
