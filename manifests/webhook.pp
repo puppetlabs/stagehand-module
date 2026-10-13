@@ -77,6 +77,29 @@
 #   Install the `git` package (with `stdlib::ensure_packages`, so another class
 #   that also wants git does not conflict). Set false if git is managed
 #   elsewhere.
+# @param git_ssh_host
+#   Host name of the git server for an SSH `control_remote` (for example
+#   `github.com`). When set, the class writes a `Host` block for it into
+#   `/root/.ssh/config.d/stagehand-webhook.conf`, includes that directory from
+#   root's `~/.ssh/config`, and pins the host key in
+#   `/root/.ssh/known_hosts_stagehand` with `StrictHostKeyChecking yes` (MD-03).
+#   Leave undef for an HTTPS remote. r10k's default `shellgit` provider ignores
+#   r10k.yaml's `git: private_key`, so this is how an SSH remote works on the
+#   first deploy.
+# @param git_ssh_key
+#   Absolute path of the deploy key's private half, already present on the
+#   node (root-owned, mode 0600). Only the path enters the catalog, never the
+#   key. Required with `git_ssh_host`. Whitespace and quotes are refused.
+# @param git_ssh_known_host
+#   The git host's public key as one known_hosts line, for example the output
+#   of `ssh-keyscan -t ed25519 github.com` checked against the provider's
+#   published fingerprints. Required with `git_ssh_host`. One line only.
+#
+# @example SSH control repository (Hiera)
+#   stagehand::webhook::control_remote: 'git@github.com:example/control-repo.git'
+#   stagehand::webhook::git_ssh_host: 'github.com'
+#   stagehand::webhook::git_ssh_key: '/root/.ssh/stagehand_deploy'
+#   stagehand::webhook::git_ssh_known_host: 'github.com ssh-ed25519 <key from ssh-keyscan>'
 #
 # @example Minimal Hiera for an HTTPS control repository
 #   stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
@@ -100,10 +123,33 @@ class stagehand::webhook (
   Stdlib::Port                     $port                 = 8088,
   Pattern[/\A([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+\z/] $deploy_timeout = '15m',
   Boolean                          $manage_git           = true,
+  Optional[Stdlib::Host]           $git_ssh_host         = undef,
+  Optional[Stdlib::Unixpath]       $git_ssh_key          = undef,
+  Optional[String[1]]              $git_ssh_known_host   = undef,
 ) {
+  # --- Refuse unsafe combinations before anything is applied (MD-05). -------
+  if $engine == 'g10k' and $g10k_command_path =~ Undef {
+    fail("stagehand::webhook: engine 'g10k' needs g10k_command_path (the module does not install g10k)")
+  }
+
+  if $git_ssh_host =~ NotUndef {
+    if $git_ssh_key =~ Undef {
+      fail('stagehand::webhook: git_ssh_host is set, so git_ssh_key (path of the deploy key on this node) is required')
+    }
+    if $git_ssh_known_host =~ Undef {
+      fail('stagehand::webhook: git_ssh_host is set, so git_ssh_known_host (the host key line) is required')
+    }
+    if $git_ssh_key =~ /[\s"']/ {
+      fail("stagehand::webhook: git_ssh_key must not contain whitespace or quotes, got '${git_ssh_key}'")
+    }
+    if $git_ssh_known_host =~ /[[:cntrl:]]/ {
+      fail('stagehand::webhook: git_ssh_known_host must be exactly one known_hosts line (no newlines)')
+    }
+  }
+
   # Every path below is rendered into YAML. Refuse control characters so a
   # value can never break out of its quoted scalar.
-  [$r10k_config, $cachedir, $basedir].each |String $path| {
+  [$r10k_config, $cachedir, $basedir, $g10k_command_path].filter |$path| { $path =~ NotUndef }.each |String $path| {
     if $path =~ /[[:cntrl:]]/ {
       fail("stagehand::webhook: path parameter '${path}' contains a control character")
     }
@@ -240,9 +286,75 @@ class stagehand::webhook (
     require => Package['webhook-go'],
   }
 
+  # --- Git over SSH (MD-03): root's ssh setup for the control repo's host. ---
+  if $git_ssh_host =~ NotUndef {
+    $ssh_fragment    = '/root/.ssh/config.d/stagehand-webhook.conf'
+    $ssh_known_hosts = '/root/.ssh/known_hosts_stagehand'
+
+    file { ['/root/.ssh', '/root/.ssh/config.d']:
+      ensure => directory,
+      owner  => 'root',
+      group  => 'root',
+      mode   => '0700',
+    }
+
+    file { $ssh_fragment:
+      ensure  => file,
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0600',
+      content => epp('stagehand/webhook/ssh_config.epp', {
+        'host'             => $git_ssh_host,
+        'identity_file'    => $git_ssh_key,
+        'known_hosts_file' => $ssh_known_hosts,
+      }),
+    }
+
+    file { $ssh_known_hosts:
+      ensure  => file,
+      owner   => 'root',
+      group   => 'root',
+      mode    => '0644',
+      content => "${git_ssh_known_host}\n",
+    }
+
+    # Root's own ssh config: make sure it exists, but leave its content alone.
+    file { '/root/.ssh/config':
+      ensure => file,
+      owner  => 'root',
+      group  => 'root',
+      mode   => '0600',
+    }
+
+    # An Include line inside a Host block only applies to that host, and
+    # file_line can only append. So anchor the Include under `Match all`
+    # (which matches every host) wherever that line already is, appending
+    # both when it is absent.
+    file_line { 'stagehand-webhook ssh match all':
+      path => '/root/.ssh/config',
+      line => 'Match all',
+    }
+
+    file_line { 'stagehand-webhook ssh include':
+      path    => '/root/.ssh/config',
+      line    => 'Include config.d/*.conf',
+      after   => '^Match all$',
+      require => File_line['stagehand-webhook ssh match all'],
+    }
+
+    $ssh_dependency = [
+      File[$ssh_fragment],
+      File[$ssh_known_hosts],
+      File_line['stagehand-webhook ssh include'],
+    ]
+  } else {
+    $ssh_dependency = []
+  }
+
   service { 'webhook-go':
     ensure    => running,
     enable    => true,
     subscribe => [File['/etc/voxpupuli/webhook.yml'], Package['webhook-go']],
+    require   => $ssh_dependency,
   }
 }
