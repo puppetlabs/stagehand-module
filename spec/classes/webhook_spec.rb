@@ -131,6 +131,47 @@ describe 'stagehand::webhook' do
         end
       end
 
+      context 'on the CA host' do
+        let(:facts) { super().merge(stagehand_puppetserver_ca: true) }
+
+        it { is_expected.to compile.with_all_deps }
+
+        it "reads the CA's own CRL, which `puppetserver ca revoke` updates at once" do
+          content = content_of(webhook_yml)
+          expect(content).to include("crl: '/etc/puppetlabs/puppetserver/ca/ca_crl.pem'")
+          expect(content).not_to include("crl: '/etc/puppetlabs/puppet/ssl/crl.pem'")
+        end
+      end
+
+      context 'on a node that is not the CA host' do
+        let(:facts) { super().merge(stagehand_puppetserver_ca: false) }
+
+        it "falls back to the agent's CRL copy" do
+          expect(content_of(webhook_yml)).to include("crl: '/etc/puppetlabs/puppet/ssl/crl.pem'")
+        end
+      end
+
+      context 'with an explicit crl_path' do
+        let(:facts) { super().merge(stagehand_puppetserver_ca: true) }
+        let(:params) { super().merge('crl_path' => '/etc/pki/stagehand/ca_crl.pem') }
+
+        it 'renders that path, even on the CA host' do
+          expect(content_of(webhook_yml)).to include("crl: '/etc/pki/stagehand/ca_crl.pem'")
+        end
+      end
+
+      context 'with a relative crl_path' do
+        let(:params) { super().merge('crl_path' => 'ca_crl.pem') }
+
+        it { is_expected.to compile.and_raise_error(%r{crl_path}) }
+      end
+
+      context 'with a crl_path containing a control character' do
+        let(:params) { super().merge('crl_path' => "/etc/pki/stagehand/ca\tcrl.pem") }
+
+        it { is_expected.to compile.and_raise_error(%r{control character}) }
+      end
+
       context 'with a Puppet 7 agent' do
         let(:facts) { os_facts.merge(puppetversion: '7.30.0') }
 
