@@ -1,0 +1,16 @@
+<%- |
+  String[1] $control_remote,
+  String[1] $basedir,
+  String[1] $cachedir,
+| -%>
+# Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
+---
+cachedir: '<%= $cachedir.regsubst("'", "''", 'G') %>'
+sources:
+  control:
+    remote: '<%= $control_remote.regsubst("'", "''", 'G') %>'
+    basedir: '<%= $basedir.regsubst("'", "''", 'G') %>'
+    prefix: false
+deploy:
+  generate_types: true
+  exclude_spec: true
