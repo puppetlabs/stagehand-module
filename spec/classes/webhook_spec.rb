@@ -327,10 +327,58 @@ describe 'stagehand::webhook' do
         end
       end
 
-      context 'with a lowercase fingerprint' do
-        let(:params) { super().merge('allowed_fingerprints' => [(['ab'] * 32).join(':')]) }
+      context 'with a fingerprint copied from `puppetserver ca list --all`' do
+        # The (SHA256) value as puppetserver prints it: 32 upper-case hex
+        # pairs joined by colons.
+        let(:fingerprint) do
+          '5B:9A:0C:41:7E:D2:13:88:6F:A4:20:C9:3B:E7:51:0D:94:2A:C6:7F:18:B3:E0:5D:72:9C:4E:A1:06:F8:3D:B5'
+        end
+        let(:params) { super().merge('allowed_fingerprints' => [fingerprint]) }
 
-        it { is_expected.to compile.and_raise_error(%r{allowed_fingerprints}) }
+        it { is_expected.to compile.with_all_deps }
+
+        it 'renders it unchanged' do
+          expect(content_of(webhook_yml)).to include("- '#{fingerprint}'")
+        end
+      end
+
+      context 'with a lower-case or mixed-case fingerprint' do
+        let(:params) do
+          super().merge('allowed_fingerprints' => [(['ab'] * 32).join(':'), (['cD'] * 32).join(':')])
+        end
+
+        it 'is accepted, as the fork accepts it, and rendered in upper case' do
+          content = content_of(webhook_yml)
+          expect(content).to include("- '#{(['AB'] * 32).join(':')}'")
+          expect(content).to include("- '#{(['CD'] * 32).join(':')}'")
+          expect(content).not_to include((['ab'] * 32).join(':'))
+          expect(content).not_to include((['cD'] * 32).join(':'))
+        end
+      end
+
+      context 'with the same fingerprint in two cases' do
+        let(:params) do
+          super().merge('allowed_fingerprints' => [(['ab'] * 32).join(':'), (['AB'] * 32).join(':')])
+        end
+
+        it 'renders it once' do
+          expect(content_of(webhook_yml).scan((['AB'] * 32).join(':')).length).to eq(1)
+        end
+      end
+
+      {
+        'a SHA-1 fingerprint (20 pairs)' => (['AB'] * 20).join(':'),
+        'a fingerprint without colons' => 'AB' * 32,
+        'a fingerprint with the (SHA256) label left on' => "(SHA256) #{(['AB'] * 32).join(':')}",
+        'a fingerprint with a non-hex character' => ((['AB'] * 31) + ['AG']).join(':'),
+        'a fingerprint with a trailing newline' => "#{(['AB'] * 32).join(':')}\n",
+        'a fingerprint with dashes instead of colons' => (['AB'] * 32).join('-'),
+      }.each do |label, value|
+        context "with #{label}" do
+          let(:params) { super().merge('allowed_fingerprints' => [value]) }
+
+          it { is_expected.to compile.and_raise_error(%r{allowed_fingerprints}) }
+        end
       end
 
       context 'with a package source whose extension does not match the OS family' do
