@@ -84,6 +84,15 @@
 # @param deploy_timeout
 #   Longest a single environment deploy may run before the fork kills it, as a
 #   Go duration such as `15m` or `1h`.
+# @param state_dir
+#   The fork's state directory (`deploys.state_dir`): job records
+#   (`jobs/<id>.json`), the cross-process deploy lock and one lock file per
+#   running process (`instances/`). The class creates it with mode 0700, owned
+#   by root, the user the service runs as (its unit has no `User=`).
+# @param max_jobs
+#   How many job records the fork keeps (`deploys.max_jobs`); the oldest
+#   finished ones beyond this are deleted, and their ids then answer 404. At
+#   least 1. Default 500, the fork's own default.
 # @param manage_git
 #   Install the `git` package (with `stdlib::ensure_packages`, so another class
 #   that also wants git does not conflict). Set false if git is managed
@@ -134,6 +143,8 @@ class stagehand::webhook (
   Stdlib::Unixpath                 $basedir              = '/etc/puppetlabs/code/environments',
   Stdlib::Port                     $port                 = 8088,
   Pattern[/\A([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+\z/] $deploy_timeout = '15m',
+  Stdlib::Unixpath                 $state_dir            = '/var/lib/webhook-go',
+  Integer[1]                       $max_jobs             = 500,
   Boolean                          $manage_git           = true,
   Optional[Stdlib::Host]           $git_ssh_host         = undef,
   Optional[Stdlib::Unixpath]       $git_ssh_key          = undef,
@@ -161,7 +172,7 @@ class stagehand::webhook (
 
   # Every path below is rendered into YAML. Refuse control characters so a
   # value can never break out of its quoted scalar.
-  [$r10k_config, $cachedir, $basedir, $g10k_command_path, $crl_path].filter |$path| { $path =~ NotUndef }.each |String $path| {
+  [$r10k_config, $cachedir, $basedir, $g10k_command_path, $crl_path, $state_dir].filter |$path| { $path =~ NotUndef }.each |String $path| {
     if $path =~ /[[:cntrl:]]/ {
       fail("stagehand::webhook: path parameter '${path}' contains a control character")
     }
@@ -305,8 +316,20 @@ class stagehand::webhook (
       'use_g10k_commands'    => $engine == 'g10k',
       'basedir'              => $basedir,
       'deploy_timeout'       => $deploy_timeout,
+      'state_dir'            => $state_dir,
+      'max_jobs'             => $max_jobs,
     }),
     require => Package['webhook-go'],
+  }
+
+  # Job records (0600) and the deploy lock live here. The fork would create
+  # the directory itself, but owning it here keeps its mode at 0700 even if
+  # a package or an operator loosens it. Owner root: the service runs as root.
+  file { $state_dir:
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0700',
   }
 
   # --- Git over SSH (MD-03): root's ssh setup for the control repo's host. ---
@@ -378,6 +401,6 @@ class stagehand::webhook (
     ensure    => running,
     enable    => true,
     subscribe => [File['/etc/voxpupuli/webhook.yml'], Package['webhook-go']],
-    require   => $ssh_dependency,
+    require   => [File[$state_dir]] + $ssh_dependency,
   }
 }

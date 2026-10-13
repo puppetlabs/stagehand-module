@@ -11,6 +11,8 @@
   Boolean      $use_g10k_commands,
   String[1]    $basedir,
   String[1]    $deploy_timeout,
+  String[1]    $state_dir,
+  Integer[1]   $max_jobs,
 | -%>
 # Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
 # Stagehand fork of webhook-go: mTLS deploy API for the Advanced Code Manager pack.
@@ -49,8 +51,10 @@ r10k:
   use_g10k_commands: <%= $use_g10k_commands %>
 deploys:
   basedir: '<%= $basedir.regsubst("'", "''", 'G') %>'
-  # Job records and the cross-process deploy lock live here.
-  state_dir: '/var/lib/webhook-go'
+  # Job records and the cross-process deploy lock live here (0700, root).
+  state_dir: '<%= $state_dir.regsubst("'", "''", 'G') %>'
   timeout: '<%= $deploy_timeout %>'
   # Bytes of engine output kept per environment (the tail).
   output_limit: 262144
+  # Job records kept; the oldest finished ones beyond this are deleted.
+  max_jobs: <%= $max_jobs %>
