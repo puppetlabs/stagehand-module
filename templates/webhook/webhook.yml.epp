@@ -20,6 +20,8 @@ server:
   port: <%= $port %>
   tls:
     enabled: true
+    # Setting client_ca switches the fork to mTLS-only mode; it then refuses to
+    # start without a server certificate and key and a non-empty allow-list.
     # This primary's own Puppet certificate and key are the server identity.
     certificate: '<%= $certificate.regsubst("'", "''", 'G') %>'
     key: '<%= $key.regsubst("'", "''", 'G') %>'
@@ -47,4 +49,8 @@ r10k:
   use_g10k_commands: <%= $use_g10k_commands %>
 deploys:
   basedir: '<%= $basedir.regsubst("'", "''", 'G') %>'
+  # Job records and the cross-process deploy lock live here.
+  state_dir: '/var/lib/webhook-go'
   timeout: '<%= $deploy_timeout %>'
+  # Bytes of engine output kept per environment (the tail).
+  output_limit: 262144

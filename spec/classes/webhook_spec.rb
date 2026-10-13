@@ -103,6 +103,8 @@ describe 'stagehand::webhook' do
           content = content_of(webhook_yml)
           expect(content).to include("basedir: '/etc/puppetlabs/code/environments'")
           expect(content).to include("timeout: '15m'")
+          expect(content).to include("state_dir: '/var/lib/webhook-go'")
+          expect(content).to include('output_limit: 262144')
         end
 
         it 'keeps the service running and enabled' do
