@@ -134,6 +134,45 @@ describe 'stagehand::webhook' do
           is_expected.to contain_service('webhook-go').that_subscribes_to('Package[webhook-go]')
         end
 
+        context 'systemd drop-in for webhook-go' do
+          let(:dropin_dir) { '/etc/systemd/system/webhook-go.service.d' }
+          let(:dropin) { "#{dropin_dir}/50-stagehand.conf" }
+
+          it 'manages the drop-in directory and file' do
+            is_expected.to contain_file(dropin_dir).with(ensure: 'directory', owner: 'root', group: 'root', mode: '0755')
+            is_expected.to contain_file(dropin).with(ensure: 'file', owner: 'root', group: 'root', mode: '0644')
+              .that_requires("File[#{dropin_dir}]")
+          end
+
+          it 'stops with SIGTERM to the main process first, then kills the rest after 60s' do
+            content = content_of(dropin)
+            expect(content).to match(%r{^\[Service\]$})
+            expect(content).to match(%r{^KillMode=mixed$})
+            expect(content).to match(%r{^TimeoutStopSec=60$})
+          end
+
+          it "clears upstream's ExecReload so a reload never sends SIGHUP" do
+            content = content_of(dropin)
+            expect(content).to match(%r{^ExecReload=$})
+            expect(content).not_to match(%r{^ExecReload=\S})
+            expect(content).not_to match(%r{^[^#]*HUP})
+          end
+
+          it 'explains why in a comment' do
+            content = content_of(dropin)
+            expect(content).to match(%r{^#.*SIGHUP}i)
+            expect(content).to match(%r{^#.*\$PID})
+            expect(content).to match(%r{^#.*process group}i)
+          end
+
+          it 'reloads systemd when the drop-in changes, before the service is managed' do
+            is_expected.to contain_exec('stagehand-webhook-systemd-reload').with(
+              command: '/bin/systemctl daemon-reload', refreshonly: true,
+            ).that_subscribes_to("File[#{dropin}]")
+            is_expected.to contain_service('webhook-go').that_requires('Exec[stagehand-webhook-systemd-reload]')
+          end
+        end
+
         it 'manages no ssh configuration for an https remote' do
           is_expected.not_to contain_file('/root/.ssh')
           is_expected.not_to contain_file('/root/.ssh/config.d/stagehand-webhook.conf')
