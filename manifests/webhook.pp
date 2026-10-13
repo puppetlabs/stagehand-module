@@ -7,8 +7,8 @@
 #   1. installs `git` (r10k's default `shellgit` provider needs it) and the
 #      r10k gem into Puppet's own Ruby with the `puppet_gem` provider, so the
 #      binary lands at `/opt/puppetlabs/puppet/bin/r10k` (the Puppet Core path;
-#      the PE path `/opt/puppetlabs/puppetserver/bin/r10k` that upstream
-#      webhook-go defaults to does not exist on Core);
+#      upstream webhook-go defaults to the r10k that Puppet Enterprise bundles
+#      with puppetserver, which does not exist on Core);
 #   2. writes `r10k.yaml` with the control repository, the code directory and
 #      an explicit cache directory;
 #   3. downloads the Stagehand fork of webhook-go from a pinned HTTPS URL,

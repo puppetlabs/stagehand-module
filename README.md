@@ -38,6 +38,29 @@ process — read it before cutting a tag.
 - **`stagehand::patching`** — roll the `patchbot` external fact onto agents
   so the console's Patching page has data (the pull path; no Bolt push
   required). Opt-in via `stagehand`'s `manage_patching` parameter.
+- **`stagehand::webhook`** — apply on a **Puppet Core primary** to make it a
+  deploy target for the Advanced Code Manager pack. Starting from a primary
+  with no code-deploy tool, it installs git and r10k (`puppet_gem`, so the
+  binary is the Core path `/opt/puppetlabs/puppet/bin/r10k`), writes
+  `r10k.yaml`, installs the Stagehand fork of webhook-go from a pinned HTTPS
+  URL whose sha256 must match, and configures it for mutual TLS with the
+  primary's own Puppet certificate: only clients signed by the estate's CA,
+  not revoked, and named on `allowed_certnames` (default
+  `stagehand-code-manager`) may deploy. SSH control repositories get a
+  root-only ssh Host block with a pinned host key. Runs as root. Minimal use:
+
+  ```yaml
+  stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
+  stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/<tag>/<package file>'
+  stagehand::webhook::webhook_package_sha256: '<64 hex characters from checksums.txt>'
+  ```
+
+  ```puppet
+  include stagehand::webhook
+  ```
+
+  Step-by-step guide, certificate signing and human test steps:
+  [`docs/stagehand-webhook.md`](docs/stagehand-webhook.md).
 - **`stagehand`** — anchor class; `include stagehand` manages nothing by
   itself, but its `manage_patching` parameter (default `false`) applies
   `stagehand::patching` when set. This is the one consolidated module

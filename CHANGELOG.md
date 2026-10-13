@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- feat(stagehand::webhook): prepare a Puppet Core primary for the Advanced Code Manager pack -- installs git and r10k (`puppet_gem`; 5.0.3 on Puppet 8, 4.1.0 on Puppet 7), writes `r10k.yaml`, installs the Stagehand webhook-go fork from a pinned HTTPS URL with a mandatory sha256, and configures its mutual-TLS deploy API on the primary's own Puppet certificate with a certname allow-list, optional fingerprint pins and the CA's CRL; SSH control repositories get a root ssh Host block with a pinned host key and `StrictHostKeyChecking yes`. Guide with human test steps: `docs/stagehand-webhook.md`.
+
 ## [1.0.0] - 2026-08-25
 
 - feat(tasks): add read-only r10k detection, deploy-key import, multi-host SSH staging, and explicit SSH-server remediation for the Stagehand control-repository setup flow
