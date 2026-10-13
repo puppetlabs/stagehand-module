@@ -52,6 +52,15 @@
 #   by `puppetserver ca list --all` or `openssl x509 -fingerprint -sha256`) of
 #   the exact client certificates allowed. Empty means any certificate with an
 #   allowed certname passes.
+# @param crl_path
+#   Certificate revocation list the fork checks every client certificate
+#   against. Default (undef): on the CA host (the `stagehand_puppetserver_ca`
+#   fact), the CA's own `/etc/puppetlabs/puppetserver/ca/ca_crl.pem`, which
+#   changes the moment `puppetserver ca revoke` runs; on any other node, the
+#   agent's copy `/etc/puppetlabs/puppet/ssl/crl.pem`. The agent copy is only
+#   refreshed on agent runs, so a revocation reaches it late. Set this on a CA
+#   with a non-default `cadir`. The fork rereads the file within a minute of a
+#   change.
 # @param engine
 #   Deploy engine the fork runs: `r10k` (default) or `g10k`. The module never
 #   installs g10k; with `g10k` you must also set `g10k_command_path`.
@@ -114,6 +123,7 @@ class stagehand::webhook (
   Pattern[/\A[0-9a-f]{64}\z/]      $webhook_package_sha256,
   Array[Pattern[/\A[A-Za-z0-9._-]+\z/], 1] $allowed_certnames = ['stagehand-code-manager'],
   Array[Pattern[/\A[0-9A-F]{2}(:[0-9A-F]{2}){31}\z/]] $allowed_fingerprints = [],
+  Optional[Stdlib::Unixpath]       $crl_path             = undef,
   Enum['r10k', 'g10k']             $engine               = 'r10k',
   Optional[Stdlib::Unixpath]       $g10k_command_path    = undef,
   Optional[Pattern[/\A[0-9A-Za-z.]+\z/]] $r10k_version   = undef,
@@ -149,7 +159,7 @@ class stagehand::webhook (
 
   # Every path below is rendered into YAML. Refuse control characters so a
   # value can never break out of its quoted scalar.
-  [$r10k_config, $cachedir, $basedir, $g10k_command_path].filter |$path| { $path =~ NotUndef }.each |String $path| {
+  [$r10k_config, $cachedir, $basedir, $g10k_command_path, $crl_path].filter |$path| { $path =~ NotUndef }.each |String $path| {
     if $path =~ /[[:cntrl:]]/ {
       fail("stagehand::webhook: path parameter '${path}' contains a control character")
     }
@@ -158,6 +168,17 @@ class stagehand::webhook (
   $core_r10k = '/opt/puppetlabs/puppet/bin/r10k'
   $ssldir    = '/etc/puppetlabs/puppet/ssl'
   $certname  = $trusted['certname']
+
+  # Revocation list: the CA's own file on the CA host, because the agent's copy
+  # only refreshes on agent runs and a revoked pack certificate would keep
+  # deploying until then.
+  if $crl_path =~ NotUndef {
+    $crl = $crl_path
+  } elsif $facts['stagehand_puppetserver_ca'] == true {
+    $crl = '/etc/puppetlabs/puppetserver/ca/ca_crl.pem'
+  } else {
+    $crl = "${ssldir}/crl.pem"
+  }
 
   # --- Package format follows the OS family. --------------------------------
   case $facts['os']['family'] {
@@ -274,7 +295,7 @@ class stagehand::webhook (
       'certificate'          => "${ssldir}/certs/${certname}.pem",
       'key'                  => "${ssldir}/private_keys/${certname}.pem",
       'client_ca'            => "${ssldir}/certs/ca.pem",
-      'crl'                  => "${ssldir}/crl.pem",
+      'crl'                  => $crl,
       'allowed_certnames'    => $allowed_certnames,
       'allowed_fingerprints' => $allowed_fingerprints,
       'command_path'         => $command_path,
