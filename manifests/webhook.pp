@@ -48,10 +48,12 @@
 #   Certnames (certificate common names) allowed to call the deploy API. At
 #   least one. Default: the pack's `stagehand-code-manager`.
 # @param allowed_fingerprints
-#   Optional pin: SHA-256 fingerprints (uppercase, colon-separated, as printed
-#   by `puppetserver ca list --all` or `openssl x509 -fingerprint -sha256`) of
-#   the exact client certificates allowed. Empty means any certificate with an
-#   allowed certname passes.
+#   Optional pin: SHA-256 fingerprints of the exact client certificates
+#   allowed, as 32 colon-separated hex pairs: the `(SHA256)` value
+#   `puppetserver ca list --all` prints (copy the hex only, not the label).
+#   Lower case is accepted; entries are rendered in upper case, once each.
+#   Anything else (a SHA-1 fingerprint, hex without colons) fails the catalog.
+#   Empty means any certificate with an allowed certname passes.
 # @param crl_path
 #   Certificate revocation list the fork checks every client certificate
 #   against. Default (undef): on the CA host (the `stagehand_puppetserver_ca`
@@ -122,7 +124,7 @@ class stagehand::webhook (
   Stdlib::HTTPSUrl                 $webhook_package_source,
   Pattern[/\A[0-9a-f]{64}\z/]      $webhook_package_sha256,
   Array[Pattern[/\A[A-Za-z0-9._-]+\z/], 1] $allowed_certnames = ['stagehand-code-manager'],
-  Array[Pattern[/\A[0-9A-F]{2}(:[0-9A-F]{2}){31}\z/]] $allowed_fingerprints = [],
+  Array[Stagehand::Sha256_fingerprint] $allowed_fingerprints = [],
   Optional[Stdlib::Unixpath]       $crl_path             = undef,
   Enum['r10k', 'g10k']             $engine               = 'r10k',
   Optional[Stdlib::Unixpath]       $g10k_command_path    = undef,
@@ -297,7 +299,7 @@ class stagehand::webhook (
       'client_ca'            => "${ssldir}/certs/ca.pem",
       'crl'                  => $crl,
       'allowed_certnames'    => $allowed_certnames,
-      'allowed_fingerprints' => $allowed_fingerprints,
+      'allowed_fingerprints' => $allowed_fingerprints.map |$fingerprint| { $fingerprint.upcase }.unique,
       'command_path'         => $command_path,
       'config_path'          => $r10k_config,
       'use_g10k_commands'    => $engine == 'g10k',
