@@ -157,6 +157,139 @@ describe 'stagehand::webhook' do
         end
       end
 
+      context 'with an SSH control remote' do
+        let(:known_host) { 'github.com ssh-ed25519 AAAAexamplehostkey' }
+        let(:params) do
+          super().merge(
+            'control_remote' => 'git@github.com:example/control-repo.git',
+            'git_ssh_host' => 'github.com',
+            'git_ssh_key' => '/root/.ssh/stagehand_deploy',
+            'git_ssh_known_host' => known_host,
+          )
+        end
+
+        it { is_expected.to compile.with_all_deps }
+
+        it 'ensures root ssh directories exist with mode 0700' do
+          is_expected.to contain_file('/root/.ssh').with(ensure: 'directory', owner: 'root', mode: '0700')
+          is_expected.to contain_file('/root/.ssh/config.d').with(ensure: 'directory', owner: 'root', mode: '0700')
+        end
+
+        it 'writes a Host block fragment that uses the deploy key and strict host key checking' do
+          is_expected.to contain_file('/root/.ssh/config.d/stagehand-webhook.conf').with(ensure: 'file', owner: 'root', mode: '0600')
+          content = content_of('/root/.ssh/config.d/stagehand-webhook.conf')
+          expect(content).to match(%r{^Host github\.com$})
+          expect(content).to include('IdentityFile "/root/.ssh/stagehand_deploy"')
+          expect(content).to include('IdentitiesOnly yes')
+          expect(content).to include('UserKnownHostsFile "/root/.ssh/known_hosts_stagehand"')
+          expect(content).to include('StrictHostKeyChecking yes')
+        end
+
+        it 'writes the operator-supplied host key line into a dedicated known_hosts file' do
+          is_expected.to contain_file('/root/.ssh/known_hosts_stagehand').with(
+            ensure: 'file', owner: 'root', mode: '0644', content: "#{known_host}\n",
+          )
+        end
+
+        it "includes the fragment from root's ssh config without owning the rest of that file" do
+          is_expected.to contain_file('/root/.ssh/config').with(ensure: 'file', owner: 'root', mode: '0600')
+          is_expected.to contain_file('/root/.ssh/config').without_content
+          is_expected.to contain_file_line('stagehand-webhook ssh match all').with(
+            path: '/root/.ssh/config', line: 'Match all',
+          )
+          is_expected.to contain_file_line('stagehand-webhook ssh include').with(
+            path: '/root/.ssh/config', line: 'Include config.d/*.conf', after: '^Match all$',
+          ).that_requires('File_line[stagehand-webhook ssh match all]')
+        end
+
+        it 'has the ssh setup in place before the service starts' do
+          is_expected.to contain_service('webhook-go').that_requires('File[/root/.ssh/config.d/stagehand-webhook.conf]')
+          is_expected.to contain_service('webhook-go').that_requires('File[/root/.ssh/known_hosts_stagehand]')
+          is_expected.to contain_service('webhook-go').that_requires('File_line[stagehand-webhook ssh include]')
+        end
+      end
+
+      context 'with git_ssh_host but no git_ssh_key' do
+        let(:params) { super().merge('git_ssh_host' => 'github.com', 'git_ssh_known_host' => 'github.com ssh-ed25519 AAAAx') }
+
+        it { is_expected.to compile.and_raise_error(%r{git_ssh_key}) }
+      end
+
+      context 'with git_ssh_host but no git_ssh_known_host' do
+        let(:params) { super().merge('git_ssh_host' => 'github.com', 'git_ssh_key' => '/root/.ssh/stagehand_deploy') }
+
+        it { is_expected.to compile.and_raise_error(%r{git_ssh_known_host}) }
+      end
+
+      context 'with a known_hosts line containing a newline' do
+        let(:params) do
+          super().merge(
+            'git_ssh_host' => 'github.com',
+            'git_ssh_key' => '/root/.ssh/stagehand_deploy',
+            'git_ssh_known_host' => "github.com ssh-ed25519 AAAAx\nevil.example ssh-ed25519 AAAAy",
+          )
+        end
+
+        it { is_expected.to compile.and_raise_error(%r{git_ssh_known_host}) }
+      end
+
+      context 'with a deploy key path containing whitespace' do
+        let(:params) do
+          super().merge(
+            'git_ssh_host' => 'github.com',
+            'git_ssh_key' => '/root/.ssh/stagehand deploy',
+            'git_ssh_known_host' => 'github.com ssh-ed25519 AAAAx',
+          )
+        end
+
+        it { is_expected.to compile.and_raise_error(%r{git_ssh_key}) }
+      end
+
+      context 'with a sha256 that is not 64 hex characters' do
+        let(:params) { super().merge('webhook_package_sha256' => 'abc') }
+
+        it { is_expected.to compile.and_raise_error(%r{webhook_package_sha256}) }
+      end
+
+      context 'with engine g10k but no g10k_command_path' do
+        let(:params) { super().merge('engine' => 'g10k') }
+
+        it { is_expected.to compile.and_raise_error(%r{g10k_command_path}) }
+      end
+
+      context 'with engine g10k and a g10k_command_path' do
+        let(:params) { super().merge('engine' => 'g10k', 'g10k_command_path' => '/usr/local/bin/g10k') }
+
+        it { is_expected.to compile.with_all_deps }
+
+        it 'points the fork at g10k and switches on the g10k commands' do
+          content = content_of(webhook_yml)
+          expect(content).to include("command_path: '/usr/local/bin/g10k'")
+          expect(content).to include('use_g10k_commands: true')
+        end
+      end
+
+      context 'with an empty allowed_certnames' do
+        let(:params) { super().merge('allowed_certnames' => []) }
+
+        it { is_expected.to compile.and_raise_error(%r{allowed_certnames}) }
+      end
+
+      context 'with allowed_fingerprints' do
+        let(:fingerprint) { (['AB'] * 32).join(':') }
+        let(:params) { super().merge('allowed_fingerprints' => [fingerprint]) }
+
+        it 'renders them into webhook.yml' do
+          expect(content_of(webhook_yml)).to match(%r{allowed_fingerprints:\n\s+- '#{fingerprint}'\n})
+        end
+      end
+
+      context 'with a lowercase fingerprint' do
+        let(:params) { super().merge('allowed_fingerprints' => [(['ab'] * 32).join(':')]) }
+
+        it { is_expected.to compile.and_raise_error(%r{allowed_fingerprints}) }
+      end
+
       context 'with a package source whose extension does not match the OS family' do
         let(:params) do
           super().merge('webhook_package_source' => "https://releases.example.test/webhook-go.#{debian ? 'rpm' : 'deb'}")
