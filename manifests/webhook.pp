@@ -397,10 +397,42 @@ class stagehand::webhook (
     $ssh_dependency = []
   }
 
+  # --- systemd drop-in (57.6-06 hand-off). ----------------------------------
+  # KillMode=mixed + TimeoutStopSec=60 let the fork's SIGTERM handler kill the
+  # engine's process group and write its job records before systemd SIGKILLs
+  # the rest; an empty ExecReload= clears upstream's reload, which signals an
+  # undefined $PID and would otherwise end the process without that cleanup.
+  # The template explains each line. No restart on change: these settings
+  # apply to the next stop or reload once systemd has re-read the unit.
+  $dropin_dir = '/etc/systemd/system/webhook-go.service.d'
+
+  file { $dropin_dir:
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+  }
+
+  file { "${dropin_dir}/50-stagehand.conf":
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => epp('stagehand/webhook/systemd-dropin.conf.epp'),
+    require => File[$dropin_dir],
+    notify  => Exec['stagehand-webhook-systemd-reload'],
+  }
+
+  exec { 'stagehand-webhook-systemd-reload':
+    command     => '/bin/systemctl daemon-reload',
+    refreshonly => true,
+    path        => ['/usr/bin', '/bin'],
+  }
+
   service { 'webhook-go':
     ensure    => running,
     enable    => true,
     subscribe => [File['/etc/voxpupuli/webhook.yml'], Package['webhook-go']],
-    require   => [File[$state_dir]] + $ssh_dependency,
+    require   => [File[$state_dir], Exec['stagehand-webhook-systemd-reload']] + $ssh_dependency,
   }
 }
