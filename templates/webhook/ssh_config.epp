@@ -1,0 +1,13 @@
+<%- |
+  String[1] $host,
+  String[1] $identity_file,
+  String[1] $known_hosts_file,
+| -%>
+# Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
+# r10k's default git provider (shellgit) ignores r10k.yaml's git.private_key and
+# uses root's ssh configuration, so the control repository's host is set up here.
+Host <%= $host %>
+  IdentityFile "<%= $identity_file %>"
+  IdentitiesOnly yes
+  UserKnownHostsFile "<%= $known_hosts_file %>"
+  StrictHostKeyChecking yes
