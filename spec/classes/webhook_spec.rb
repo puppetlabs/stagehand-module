@@ -9,10 +9,22 @@ require 'spec_helper'
 # primary's own Puppet certificate, and a running service.
 describe 'stagehand::webhook' do
   let(:node) { 'primary.example.test' }
-  let(:sha256) { 'a' * 64 }
-  let(:control_remote) { 'https://git.example.test/puppet/control-repo.git' }
-  let(:webhook_yml) { '/etc/voxpupuli/webhook.yml' }
-  let(:r10k_yaml) { '/etc/puppetlabs/r10k/r10k.yaml' }
+
+  def sha256
+    'a' * 64
+  end
+
+  def control_remote
+    'https://git.example.test/puppet/control-repo.git'
+  end
+
+  def webhook_yml
+    '/etc/voxpupuli/webhook.yml'
+  end
+
+  def r10k_yaml
+    '/etc/puppetlabs/r10k/r10k.yaml'
+  end
 
   on_supported_os.each do |os, os_facts|
     context "on #{os}" do
@@ -135,13 +147,18 @@ describe 'stagehand::webhook' do
         end
 
         context 'systemd drop-in for webhook-go' do
-          let(:dropin_dir) { '/etc/systemd/system/webhook-go.service.d' }
-          let(:dropin) { "#{dropin_dir}/50-stagehand.conf" }
+          def dropin_dir
+            '/etc/systemd/system/webhook-go.service.d'
+          end
+
+          def dropin
+            "#{dropin_dir}/50-stagehand.conf"
+          end
 
           it 'manages the drop-in directory and file' do
             is_expected.to contain_file(dropin_dir).with(ensure: 'directory', owner: 'root', group: 'root', mode: '0755')
             is_expected.to contain_file(dropin).with(ensure: 'file', owner: 'root', group: 'root', mode: '0644')
-              .that_requires("File[#{dropin_dir}]")
+                                               .that_requires("File[#{dropin_dir}]")
           end
 
           it 'stops with SIGTERM to the main process first, then kills the rest after 60s' do
@@ -282,7 +299,9 @@ describe 'stagehand::webhook' do
       end
 
       context 'with an SSH control remote' do
-        let(:known_host) { 'github.com ssh-ed25519 AAAAexamplehostkey' }
+        def known_host
+          'github.com ssh-ed25519 AAAAexamplehostkey'
+        end
         let(:params) do
           super().merge(
             'control_remote' => 'git@github.com:example/control-repo.git',
@@ -400,7 +419,9 @@ describe 'stagehand::webhook' do
       end
 
       context 'with allowed_fingerprints' do
-        let(:fingerprint) { (['AB'] * 32).join(':') }
+        def fingerprint
+          (['AB'] * 32).join(':')
+        end
         let(:params) { super().merge('allowed_fingerprints' => [fingerprint]) }
 
         it 'renders them into webhook.yml' do
@@ -411,7 +432,7 @@ describe 'stagehand::webhook' do
       context 'with a fingerprint copied from `puppetserver ca list --all`' do
         # The (SHA256) value as puppetserver prints it: 32 upper-case hex
         # pairs joined by colons.
-        let(:fingerprint) do
+        def fingerprint
           '5B:9A:0C:41:7E:D2:13:88:6F:A4:20:C9:3B:E7:51:0D:94:2A:C6:7F:18:B3:E0:5D:72:9C:4E:A1:06:F8:3D:B5'
         end
         let(:params) { super().merge('allowed_fingerprints' => [fingerprint]) }
