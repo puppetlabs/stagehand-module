@@ -63,15 +63,24 @@ You need:
 
 ## Step 1: pick the fork's package and its digest
 
-1. Open the fork's releases page:
-   `https://github.com/puppet-stagehand/webhook-go/releases`. Release tags look
-   like `v2.15.1-stagehand.1`.
-2. Choose the package that matches the primary: the `.deb` file for
-   Ubuntu/Debian, the `.rpm` file for RHEL, Rocky or Alma, and the right CPU
-   type (`amd64`/`x86_64` or `arm64`/`aarch64`). Copy its download link. That
-   link is `webhook_package_source`.
-3. Open the release's `checksums.txt`. Find the line for your file. The 64
-   characters before the file name are `webhook_package_sha256`.
+The current release is **`v2.15.1-stagehand.1`**
+(<https://github.com/puppet-stagehand/webhook-go/releases/tag/v2.15.1-stagehand.1>).
+Pick the row that matches the primary: the `.deb` for Ubuntu/Debian, the `.rpm`
+for RHEL, Rocky or Alma, and the CPU type (`amd64`/`x86_64` or
+`arm64`/`aarch64`). The link is `webhook_package_source` and the 64 characters
+are `webhook_package_sha256`.
+
+| Primary | Package | `webhook_package_sha256` |
+|---------|---------|--------------------------|
+| Debian/Ubuntu, Intel/AMD | [`webhook-go_2.15.1-stagehand.1_linux_amd64.deb`](https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_amd64.deb) | `432e1ae4cce129ab87d4a3b63e336a467123d8378d29f2691f2e737922f1b22e` |
+| Debian/Ubuntu, Arm | [`webhook-go_2.15.1-stagehand.1_linux_arm64.deb`](https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_arm64.deb) | `74d885b29c0519827f19848c2566b192f83fb952c4efb9ea986a077d1c006abb` |
+| RHEL/Rocky/Alma, Intel/AMD | [`webhook-go_2.15.1-stagehand.1_linux_amd64.rpm`](https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_amd64.rpm) | `f613851db426b86688b0cf9a25c6948794d761c0091d4e6d4eb7f28221233b31` |
+| RHEL/Rocky/Alma, Arm | [`webhook-go_2.15.1-stagehand.1_linux_arm64.rpm`](https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_arm64.rpm) | `6a69c4299ae9216098baf6257cf7c3fb1bcbf3e1c6270ecab20d576b4652db4c` |
+
+These digests were copied from the release's `checksums.txt` after the
+signature below verified. Check them against that file yourself rather than
+trusting this page; a newer release has newer values, and its `checksums.txt`
+is the source of truth.
 
 **Why the digest matters.** Puppet downloads the package and refuses to install
 it unless its digest matches the one you wrote down. If anybody swaps the file
@@ -79,21 +88,29 @@ on the download server, or the download is damaged, nothing gets installed.
 
 **Check the signature once, before you pin.** The digest only proves the file is
 the one you pinned, so make sure what you pin is genuine. Stagehand signs each
-release's `checksums.txt` with cosign. On any machine with
-[cosign](https://docs.sigstore.dev/) installed, download `checksums.txt` and its
-signature files from the same release, then run the verification command shown
-in the release notes. It looks like this:
+release's `checksums.txt` with cosign (keyless: the signature is tied to the
+fork's release workflow, not to a key someone could lose). You need
+[cosign](https://docs.sigstore.dev/) 2.4 or newer. Download `checksums.txt` and
+`checksums.txt.sigstore.json` from the release, then run:
 
 ```sh
+TAG=v2.15.1-stagehand.1
 cosign verify-blob \
-  --certificate checksums.txt.pem \
-  --signature checksums.txt.sig \
-  --certificate-identity-regexp '^https://github.com/puppet-stagehand/webhook-go/' \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/puppet-stagehand/webhook-go/.github/workflows/release.yml@refs/tags/${TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   checksums.txt
 ```
 
 It must print `Verified OK`. If it does not, stop and do not use that release.
+The `--certificate-identity` value names the exact repository
+(`puppet-stagehand/webhook-go`), workflow (`release.yml`) and tag, so a
+look-alike release from another organisation or tag fails this check even if it
+is signed. Change `TAG` when you move to a newer release.
+
+To check a package you have already downloaded against that signed file, run
+`sha256sum -c --ignore-missing checksums.txt` in the folder that holds both; it
+prints `OK` next to each package it finds.
 
 ## Step 2: write the settings (Hiera)
 
@@ -104,8 +121,9 @@ parameter is shown here; the ones marked "default" can be left out.
 ```yaml
 # Required
 stagehand::webhook::control_remote: 'git@github.com:example/control-repo.git'
-stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/<tag>/<package file>'
-stagehand::webhook::webhook_package_sha256: '<64 hex characters from checksums.txt>'
+# Example for a Debian/Ubuntu Intel/AMD primary; pick your row from Step 1
+stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_amd64.deb'
+stagehand::webhook::webhook_package_sha256: '432e1ae4cce129ab87d4a3b63e336a467123d8378d29f2691f2e737922f1b22e'
 
 # Only for an SSH control_remote (leave all three out for HTTPS)
 stagehand::webhook::git_ssh_host: 'github.com'

@@ -128,8 +128,8 @@
 #
 # @example Minimal Hiera for an HTTPS control repository
 #   stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
-#   stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_amd64.deb'
-#   stagehand::webhook::webhook_package_sha256: '<64 hex characters from checksums.txt>'
+#   stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_amd64.deb'
+#   stagehand::webhook::webhook_package_sha256: '432e1ae4cce129ab87d4a3b63e336a467123d8378d29f2691f2e737922f1b22e'
 #
 # @example Classify the primary
 #   include stagehand::webhook
