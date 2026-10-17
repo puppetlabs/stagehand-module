@@ -25,11 +25,11 @@ describe 'stagehand::console::k3s' do
 
   let(:required_params) do
     {
-      'sizing_tier'        => 'small',
-      'image_ref'          => valid_image_ref,
-      'db_password'        => sensitive(test_db_password),
-      'ingest_token'       => sensitive(test_ingest_token),
-      'dataservice_token'  => sensitive(test_dataservice_token),
+      'sizing_tier' => 'small',
+      'image_ref' => valid_image_ref,
+      'db_password' => sensitive(test_db_password),
+      'ingest_token' => sensitive(test_ingest_token),
+      'dataservice_token' => sensitive(test_dataservice_token),
     }
   end
 
@@ -125,7 +125,7 @@ describe 'stagehand::console::k3s' do
           end
 
           it 'suppresses Puppet diff output' do
-            expect(subject[:show_diff]).to eq(false)
+            expect(subject[:show_diff]).to be(false)
           end
 
           it 'renders the three secret values via stringData' do
@@ -138,8 +138,8 @@ describe 'stagehand::console::k3s' do
         end
 
         it 'is the only File resource carrying secret material (mode 0600)' do
-          mode_0600 = catalogue.resources.select { |r| r.type == 'File' && r[:mode] == '0600' }
-          expect(mode_0600.length).to eq(1)
+          secret_mode_files = catalogue.resources.select { |r| r.type == 'File' && r[:mode] == '0600' }
+          expect(secret_mode_files.length).to eq(1)
         end
 
         it 'is the only File resource with show_diff set' do
@@ -159,7 +159,7 @@ describe 'stagehand::console::k3s' do
           expect(pg_content).not_to include(test_db_password)
         end
 
-        it "the console manifest references the Secret by name (secretKeyRef)" do
+        it 'the console manifest references the Secret by name (secretKeyRef)' do
           console_content = catalogue.resource('File', '/var/lib/rancher/k3s/server/manifests/stagehand-console.yaml')[:content]
           expect(console_content).to match(%r{secretKeyRef})
           expect(console_content).to match(%r{stagehand-console-secrets})
