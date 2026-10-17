@@ -36,9 +36,12 @@ end
 # beta line anyway (see ci.yml's openvox9-beta job: dependency-resolution
 # only, continue-on-error), so skip this group entirely for that scenario
 # rather than let Bundler's resolver fail closed on an unresolvable graph.
+# The version can arrive as a requirement ("~> 9.0", ">= 9.0" from the
+# voxpupuli matrix's OPENVOX_GEM_VERSION) as well as a bare "9.0.1", so 9.
+# is matched at the start or after whitespace.
 openvox_gem_version = ENV['OPENVOX_GEM_VERSION'] ||
                       (ENV['CI_PUPPET_GEM_NAME'] == 'openvox' ? ENV['CI_PUPPET_GEM_VERSION'] : nil)
-skip_system_tests_for_openvox_beta = openvox_gem_version && openvox_gem_version.match?(/\A9\.|pre|beta|alpha/i)
+skip_system_tests_for_openvox_beta = openvox_gem_version && openvox_gem_version.match?(/(\A|\s)9\.|pre|beta|alpha/i)
 
 group :system_tests do
   gem 'puppet_litmus', '~> 2.5', :require => false
