@@ -39,8 +39,8 @@ Console deployment.
 
 ### Tasks
 
-* [`class_enumerate`](#class_enumerate): Read-only report of a node's currently-applied Puppet classes, read from the agent's local applied-classes state file — never a live catalog 
-* [`discover`](#discover): Read-only RAL enumeration of a node's current package/user/group/service (default) and mount/cron (opt-in) state via `puppet resource <type> 
+* [`class_enumerate`](#class_enumerate): Read-only report of a node's currently-applied Puppet classes, read from the agent's local applied-classes state file — never a live catalog
+* [`discover`](#discover): Read-only RAL enumeration of a node's current package/user/group/service (default) and mount/cron (opt-in) state via `puppet resource <type>
 * [`ensure_ssh_server`](#ensure_ssh_server): Install and start an OpenSSH server on this host if not already present — idempotent, safe to run repeatedly. Detects the package manager (ap
 * [`inspector_scan`](#inspector_scan): Run a Puppet Inspector profile against a node and POST normalized compliance.v1 results to the console. Self-contained (bundles the inspector
 * [`install_ansible`](#install_ansible): Ensures ansible-playbook is present on the node per install_method (auto/package/pip/pipx/wsl/skip). Standalone task for direct/manual use; s
@@ -1047,7 +1047,7 @@ puppetlabs/scheduled_task, so the whole pack pins only puppetlabs/stdlib.
 
 #### Examples
 
-##### 
+#####
 
 ```puppet
 include stagehand::patching
@@ -1352,7 +1352,7 @@ consolidation (docs/design/stagehand-consolidation-plan.md).
 
 #### Examples
 
-##### 
+#####
 
 ```puppet
 file { '/etc/app/secret':
@@ -1373,7 +1373,7 @@ Returns: `Deferred` node-decryptable value suitable for any resource parameter.
 
 ##### Examples
 
-###### 
+######
 
 ```puppet
 file { '/etc/app/secret':
@@ -1753,4 +1753,3 @@ Filesystem path to scan (trivy rootfs).
 Data type: `Boolean`
 
 Install Trivy if it is not already present.
-

@@ -130,10 +130,30 @@ describe 'stagehand::console' do
       )
     }
 
+    # Since 7e72aaf1 the pg_hba append runs a script file via /bin/sh (the
+    # exec provider can't run a command whose first word is a shell
+    # variable assignment), so the exec requires that file as well as the
+    # database. The reload notify is the part that matters most: a pg_hba
+    # change that never reloads postgres leaves the console unable to log in.
     it {
       is_expected.to contain_exec('stagehand::console::pg_hba').with(
-        require: 'Exec[stagehand::console::pg_db]',
+        command: '/bin/sh /etc/puppet-console-pg-state/pg_hba.sh',
+      ).that_requires(
+        [
+          'Exec[stagehand::console::pg_db]',
+          'File[/etc/puppet-console-pg-state/pg_hba.sh]',
+        ],
       ).that_notifies('Exec[stagehand::console::pg_hba_reload]')
+    }
+
+    it {
+      is_expected.to contain_file('/etc/puppet-console-pg-state/pg_hba.sh').with(
+        ensure: 'file',
+        owner: 'postgres',
+        group: 'postgres',
+        mode: '0700',
+        content: %r{host    psh    psh    127\.0\.0\.1/32    scram-sha-256},
+      )
     }
 
     it { is_expected.not_to contain_exec('stagehand::console::pg_db_drop') }
