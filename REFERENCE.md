@@ -21,6 +21,7 @@ Hiera into the k3s manifests directory for k3s to reconcile.
 * [`stagehand::platform_lock::rpm`](#stagehand--platform_lock--rpm): Apply exact RPM NEVRAs through the native DNF versionlock plugin.
 * [`stagehand::platform_lock::windows`](#stagehand--platform_lock--windows): Install Windows Puppet packages at exact display versions from immutable MSIs.
 * [`stagehand::platform_lock::zypper`](#stagehand--platform_lock--zypper): Apply exact SUSE package versions and solver-visible zypper locks.
+* [`stagehand::webhook`](#stagehand--webhook): Install r10k and the Stagehand webhook-go fork on a Puppet Core primary.
 
 ### Defined types
 
@@ -36,6 +37,7 @@ Hiera into the k3s manifests directory for k3s to reconcile.
 * [`Stagehand::Docker_image_ref`](#Stagehand--Docker_image_ref): A fully-qualified, digest-pinned Docker image reference.
 * [`Stagehand::K3s::Sizing_tier`](#Stagehand--K3s--Sizing_tier): The appliance's operator-chosen sizing tier for a k3s-hosted
 Console deployment.
+* [`Stagehand::Sha256_fingerprint`](#Stagehand--Sha256_fingerprint): A certificate's SHA-256 fingerprint in colon hex.
 
 ### Tasks
 
@@ -1274,6 +1276,291 @@ Data type: `Hash[String, String]`
 
 
 
+### <a name="stagehand--webhook"></a>`stagehand::webhook`
+
+Classify a Puppet Core primary with this class to make it a deploy target for
+the Stagehand Advanced Code Manager pack. Starting from a primary that has no
+code-deploy tool at all (Phase 57.6 D-31), one agent run:
+
+  1. installs `git` (r10k's default `shellgit` provider needs it) and the
+     r10k gem into Puppet's own Ruby with the `puppet_gem` provider, so the
+     binary lands at `/opt/puppetlabs/puppet/bin/r10k` (the Puppet Core path;
+     upstream webhook-go defaults to the r10k that Puppet Enterprise bundles
+     with puppetserver, which does not exist on Core);
+  2. writes `r10k.yaml` with the control repository, the code directory and
+     an explicit cache directory;
+  3. downloads the Stagehand fork of webhook-go from a pinned HTTPS URL,
+     refuses it unless its SHA-256 matches the pinned digest, and installs it
+     with the native package tool (`dpkg` or `rpm`);
+  4. writes `/etc/voxpupuli/webhook.yml` so the fork serves its deploy API
+     over mutual TLS: the server identity is this node's own Puppet
+     certificate and key (D-11), clients must present a certificate signed by
+     this estate's CA, not revoked in its CRL, and named on
+     `allowed_certnames`. On the CA host the CRL is the CA's own
+     `ca_crl.pem`, which a revocation updates at once;
+  5. creates the fork's state directory (job records and the deploy lock)
+     with mode 0700, and a systemd drop-in so stopping the service lets the
+     fork kill a running engine and write its records, and a reload never
+     sends SIGHUP;
+  6. keeps the `webhook-go` service running, restarting it whenever its
+     config or its package changes.
+
+**Runs as root (MD-04).** The fork's systemd unit has no `User=`, like
+upstream's. That is deliberate: r10k must write the Puppet code directory and
+the service must read this node's Puppet private key. Exposure is limited to
+mTLS clients on the allow-list; the accepted risk is AR-57.6-08.
+
+Step-by-step guide, prerequisites, signing the pack's certificate, and human
+test steps: `docs/stagehand-webhook.md`.
+
+#### Examples
+
+##### SSH control repository (Hiera)
+
+```puppet
+stagehand::webhook::control_remote: 'git@github.com:example/control-repo.git'
+stagehand::webhook::git_ssh_host: 'github.com'
+stagehand::webhook::git_ssh_key: '/root/.ssh/stagehand_deploy'
+stagehand::webhook::git_ssh_known_host: 'github.com ssh-ed25519 <key from ssh-keyscan>'
+```
+
+##### Minimal Hiera for an HTTPS control repository
+
+```puppet
+stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
+stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_amd64.deb'
+stagehand::webhook::webhook_package_sha256: '432e1ae4cce129ab87d4a3b63e336a467123d8378d29f2691f2e737922f1b22e'
+```
+
+##### Classify the primary
+
+```puppet
+include stagehand::webhook
+```
+
+#### Parameters
+
+The following parameters are available in the `stagehand::webhook` class:
+
+* [`control_remote`](#-stagehand--webhook--control_remote)
+* [`webhook_package_source`](#-stagehand--webhook--webhook_package_source)
+* [`webhook_package_sha256`](#-stagehand--webhook--webhook_package_sha256)
+* [`allowed_certnames`](#-stagehand--webhook--allowed_certnames)
+* [`allowed_fingerprints`](#-stagehand--webhook--allowed_fingerprints)
+* [`crl_path`](#-stagehand--webhook--crl_path)
+* [`engine`](#-stagehand--webhook--engine)
+* [`g10k_command_path`](#-stagehand--webhook--g10k_command_path)
+* [`r10k_version`](#-stagehand--webhook--r10k_version)
+* [`r10k_config`](#-stagehand--webhook--r10k_config)
+* [`cachedir`](#-stagehand--webhook--cachedir)
+* [`basedir`](#-stagehand--webhook--basedir)
+* [`port`](#-stagehand--webhook--port)
+* [`deploy_timeout`](#-stagehand--webhook--deploy_timeout)
+* [`state_dir`](#-stagehand--webhook--state_dir)
+* [`max_jobs`](#-stagehand--webhook--max_jobs)
+* [`manage_git`](#-stagehand--webhook--manage_git)
+* [`git_ssh_host`](#-stagehand--webhook--git_ssh_host)
+* [`git_ssh_key`](#-stagehand--webhook--git_ssh_key)
+* [`git_ssh_known_host`](#-stagehand--webhook--git_ssh_known_host)
+
+##### <a name="-stagehand--webhook--control_remote"></a>`control_remote`
+
+Data type: `Pattern[/\A[^\s'"]+\z/]`
+
+Git URL of the control repository r10k deploys from, for example
+`git@github.com:example/control-repo.git` or
+`https://github.com/example/control-repo.git`. Whitespace and quote
+characters are refused.
+
+##### <a name="-stagehand--webhook--webhook_package_source"></a>`webhook_package_source`
+
+Data type: `Stdlib::HTTPSUrl`
+
+HTTPS URL of the Stagehand webhook-go fork package for this node: the `.deb`
+on Debian-family systems, the `.rpm` on RedHat-family systems. Take it from
+the fork's signed GitHub release. Changing it to a newer release upgrades
+the package.
+
+##### <a name="-stagehand--webhook--webhook_package_sha256"></a>`webhook_package_sha256`
+
+Data type: `Pattern[/\A[0-9a-f]{64}\z/]`
+
+SHA-256 digest (64 lowercase hex characters) of that exact package file,
+from the release's checksums. Puppet refuses to install a download that
+does not match.
+
+##### <a name="-stagehand--webhook--allowed_certnames"></a>`allowed_certnames`
+
+Data type: `Array[Pattern[/\A[A-Za-z0-9._-]+\z/], 1]`
+
+Certnames (certificate common names) allowed to call the deploy API. At
+least one. Default: the pack's `stagehand-code-manager`.
+
+Default value: `['stagehand-code-manager']`
+
+##### <a name="-stagehand--webhook--allowed_fingerprints"></a>`allowed_fingerprints`
+
+Data type: `Array[Stagehand::Sha256_fingerprint]`
+
+Optional pin: SHA-256 fingerprints of the exact client certificates
+allowed, as 32 colon-separated hex pairs: the `(SHA256)` value
+`puppetserver ca list --all` prints (copy the hex only, not the label).
+Lower case is accepted; entries are rendered in upper case, once each.
+Anything else (a SHA-1 fingerprint, hex without colons) fails the catalog.
+Empty means any certificate with an allowed certname passes.
+
+Default value: `[]`
+
+##### <a name="-stagehand--webhook--crl_path"></a>`crl_path`
+
+Data type: `Optional[Stdlib::Unixpath]`
+
+Certificate revocation list the fork checks every client certificate
+against. Default (undef): on the CA host (the `stagehand_puppetserver_ca`
+fact), the CA's own `/etc/puppetlabs/puppetserver/ca/ca_crl.pem`, which
+changes the moment `puppetserver ca revoke` runs; on any other node, the
+agent's copy `/etc/puppetlabs/puppet/ssl/crl.pem`. The agent copy is only
+refreshed on agent runs, so a revocation reaches it late. Set this on a CA
+with a non-default `cadir`. The fork rereads the file within a minute of a
+change.
+
+Default value: `undef`
+
+##### <a name="-stagehand--webhook--engine"></a>`engine`
+
+Data type: `Enum['r10k', 'g10k']`
+
+Deploy engine the fork runs: `r10k` (default) or `g10k`. The module never
+installs g10k; with `g10k` you must also set `g10k_command_path`.
+
+Default value: `'r10k'`
+
+##### <a name="-stagehand--webhook--g10k_command_path"></a>`g10k_command_path`
+
+Data type: `Optional[Stdlib::Unixpath]`
+
+Absolute path of an already-installed g10k binary. Required when `engine`
+is `g10k`, ignored otherwise.
+
+Default value: `undef`
+
+##### <a name="-stagehand--webhook--r10k_version"></a>`r10k_version`
+
+Data type: `Optional[Pattern[/\A[0-9A-Za-z.]+\z/]]`
+
+Exact r10k gem version. Default (undef): 5.0.3 on Puppet 8 or later, 4.1.0
+on Puppet 7 (r10k 5 needs Ruby 3.1, which Puppet 7 agents do not ship).
+
+Default value: `undef`
+
+##### <a name="-stagehand--webhook--r10k_config"></a>`r10k_config`
+
+Data type: `Stdlib::Unixpath`
+
+Path of the r10k config file.
+
+Default value: `'/etc/puppetlabs/r10k/r10k.yaml'`
+
+##### <a name="-stagehand--webhook--cachedir"></a>`cachedir`
+
+Data type: `Stdlib::Unixpath`
+
+r10k's git cache directory. Set explicitly because r10k's own default is
+the running user's home directory.
+
+Default value: `'/opt/puppetlabs/puppet/cache/r10k'`
+
+##### <a name="-stagehand--webhook--basedir"></a>`basedir`
+
+Data type: `Stdlib::Unixpath`
+
+The Puppet code directory r10k deploys environments into.
+
+Default value: `'/etc/puppetlabs/code/environments'`
+
+##### <a name="-stagehand--webhook--port"></a>`port`
+
+Data type: `Stdlib::Port`
+
+TCP port the fork listens on.
+
+Default value: `8088`
+
+##### <a name="-stagehand--webhook--deploy_timeout"></a>`deploy_timeout`
+
+Data type: `Pattern[/\A([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+\z/]`
+
+Longest a single environment deploy may run before the fork kills it, as a
+Go duration such as `15m` or `1h`.
+
+Default value: `'15m'`
+
+##### <a name="-stagehand--webhook--state_dir"></a>`state_dir`
+
+Data type: `Stdlib::Unixpath`
+
+The fork's state directory (`deploys.state_dir`): job records
+(`jobs/<id>.json`), the cross-process deploy lock and one lock file per
+running process (`instances/`). The class creates it with mode 0700, owned
+by root, the user the service runs as (its unit has no `User=`).
+
+Default value: `'/var/lib/webhook-go'`
+
+##### <a name="-stagehand--webhook--max_jobs"></a>`max_jobs`
+
+Data type: `Integer[1]`
+
+How many job records the fork keeps (`deploys.max_jobs`); the oldest
+finished ones beyond this are deleted, and their ids then answer 404. At
+least 1. Default 500, the fork's own default.
+
+Default value: `500`
+
+##### <a name="-stagehand--webhook--manage_git"></a>`manage_git`
+
+Data type: `Boolean`
+
+Install the `git` package (with `stdlib::ensure_packages`, so another class
+that also wants git does not conflict). Set false if git is managed
+elsewhere.
+
+Default value: `true`
+
+##### <a name="-stagehand--webhook--git_ssh_host"></a>`git_ssh_host`
+
+Data type: `Optional[Stdlib::Host]`
+
+Host name of the git server for an SSH `control_remote` (for example
+`github.com`). When set, the class writes a `Host` block for it into
+`/root/.ssh/config.d/stagehand-webhook.conf`, includes that directory from
+root's `~/.ssh/config`, and pins the host key in
+`/root/.ssh/known_hosts_stagehand` with `StrictHostKeyChecking yes` (MD-03).
+Leave undef for an HTTPS remote. r10k's default `shellgit` provider ignores
+r10k.yaml's `git: private_key`, so this is how an SSH remote works on the
+first deploy.
+
+Default value: `undef`
+
+##### <a name="-stagehand--webhook--git_ssh_key"></a>`git_ssh_key`
+
+Data type: `Optional[Stdlib::Unixpath]`
+
+Absolute path of the deploy key's private half, already present on the
+node (root-owned, mode 0600). Only the path enters the catalog, never the
+key. Required with `git_ssh_host`. Whitespace and quotes are refused.
+
+Default value: `undef`
+
+##### <a name="-stagehand--webhook--git_ssh_known_host"></a>`git_ssh_known_host`
+
+Data type: `Optional[String[1]]`
+
+The git host's public key as one known_hosts line, for example the output
+of `ssh-keyscan -t ed25519 github.com` checked against the provider's
+published fingerprints. Required with `git_ssh_host`. One line only.
+
+Default value: `undef`
+
 ## Defined types
 
 ### <a name="stagehand--console_integration--puppet_conf"></a>`stagehand::console_integration::puppet_conf`
@@ -1437,6 +1724,18 @@ type-name segments verbatim, underscores preserved, only the first
 letter capitalized.
 
 Alias of `Enum['small', 'medium', 'large']`
+
+### <a name="Stagehand--Sha256_fingerprint"></a>`Stagehand::Sha256_fingerprint`
+
+32 hex pairs joined by colons, the `(SHA256)` value `puppetserver ca list
+--all` prints and the form `openssl x509 -noout -fingerprint -sha256` gives
+after its `sha256 Fingerprint=` label, for example
+`5B:9A:0C:...:3D:B5`. Copy only the hex: the `(SHA256)` label, a SHA-1
+fingerprint (20 pairs), bare hex without colons and any surrounding
+whitespace are refused. Lower case is accepted, as the webhook-go fork
+accepts it; `stagehand::webhook` renders every entry in upper case.
+
+Alias of `Pattern[/\A[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){31}\z/]`
 
 ## Tasks
 
