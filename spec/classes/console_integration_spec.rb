@@ -38,12 +38,12 @@ describe 'stagehand::console_integration' do
 
         it "renders today's three-tier default unchanged" do
           content = catalogue.resource('File', hiera_yaml_path)[:content]
-          uris = content.scan(/^\s*- "(.+)"$/).flatten
+          uris = content.scan(%r{^\s*- "(.+)"$}).flatten
           expect(uris).to eq([
-                                'nodes/%{trusted.certname}',
-                                'group/%{trusted.external.psh.primary_group}',
-                                'common',
-                              ])
+                               'nodes/%{trusted.certname}',
+                               'group/%{trusted.external.psh.primary_group}',
+                               'common',
+                             ])
         end
       end
 
@@ -62,13 +62,13 @@ describe 'stagehand::console_integration' do
 
         it 'renders exactly those four entries, in that order' do
           content = catalogue.resource('File', hiera_yaml_path)[:content]
-          uris = content.scan(/^\s*- "(.+)"$/).flatten
+          uris = content.scan(%r{^\s*- "(.+)"$}).flatten
           expect(uris).to eq(custom_uris)
         end
 
         it 'renders exactly one common entry -- the template adds none of its own' do
           content = catalogue.resource('File', hiera_yaml_path)[:content]
-          expect(content.scan(/- "common"/).length).to eq(1)
+          expect(content.scan('- "common"').length).to eq(1)
         end
       end
 
