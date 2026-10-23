@@ -48,6 +48,8 @@
 #   STAGEHAND_CUTOVER_CHOWN       default /usr/bin/chown
 #   STAGEHAND_CUTOVER_LEGACY_CONFIG  default /etc/voxpupuli/webhook.yml
 #   STAGEHAND_CUTOVER_PROTECTED_HARDLINKS  default /proc/sys/fs/protected_hardlinks
+#   STAGEHAND_CUTOVER_ID          default /usr/bin/id
+#   STAGEHAND_CUTOVER_RUNUSER     default /usr/sbin/runuser
 #
 # Exit codes: 0 done, 1 failed, 2 usage, 75 a deploy is running (nothing changed).
 #
@@ -70,6 +72,8 @@ FLOCK=${STAGEHAND_CUTOVER_FLOCK:-/usr/bin/flock}
 CHOWN=${STAGEHAND_CUTOVER_CHOWN:-/usr/bin/chown}
 LEGACY_CONFIG=${STAGEHAND_CUTOVER_LEGACY_CONFIG:-/etc/voxpupuli/webhook.yml}
 PROTECTED_HARDLINKS=${STAGEHAND_CUTOVER_PROTECTED_HARDLINKS:-/proc/sys/fs/protected_hardlinks}
+ID=${STAGEHAND_CUTOVER_ID:-/usr/bin/id}
+RUNUSER=${STAGEHAND_CUTOVER_RUNUSER:-/usr/sbin/runuser}
 LEGACY_UNIT=webhook-go.service
 
 usage() {
@@ -116,6 +120,21 @@ cmd_stop_legacy() {
     fi
     mkdir -p "$legacy"
   fi
+
+  # flock(1) creates its lock path and follows symlinks. That is safe here only
+  # because nobody but root can write this directory (webhook-go ran as root);
+  # refuse rather than lock somewhere another user could plant a link
+  # (T-57.6.2-53).
+  [ -L "$legacy" ] && die "legacy_state_dir '$legacy' is a symlink; point it at the real directory (nothing was changed)"
+  legacy_mode=$(stat -c '%u %a' "$legacy") || die "cannot read legacy_state_dir '$legacy' (nothing was changed)"
+  case "$legacy_mode" in
+    "$("$ID" -u) "[0-7][0-7][0-7]) ;;
+    *) die "legacy_state_dir '$legacy' is not owned by root, so its deploy lock is not safe to take as root (nothing was changed)" ;;
+  esac
+  case "${legacy_mode#* }" in
+    [0-7][0145][0145]) ;;
+    *) die "legacy_state_dir '$legacy' is writable by its group or by everyone, so its deploy lock is not safe to take as root (nothing was changed)" ;;
+  esac
 
   rc=0
   "$FLOCK" -n -E 75 "$legacy/deploy.lock" /bin/sh "$0" _stop-locked "$legacy" || rc=$?
@@ -187,13 +206,35 @@ cmd_own() {
   # at all; without it, refuse rather than walk a tree it could have seeded.
   hardlinks=$(cat "$PROTECTED_HARDLINKS" 2>/dev/null) || hardlinks=
   [ "$hardlinks" = 1 ] || die "fs.protected_hardlinks is not 1 (read '${hardlinks:-nothing}' from $PROTECTED_HARDLINKS), so handing these directories to $run_as as root is not safe; set it with sysctl and apply again (nothing was changed)"
+  # The lock lives in a directory the agent user can write, and flock(1) would
+  # open it with O_CREAT and follow a symlink: a planted link would have root
+  # create any file it names, /etc/nologin for one (T-57.6.2-53). So root never
+  # creates or follows it. A missing lock (the agent has not deployed yet) is
+  # created as the agent user; anything but a regular file is refused; the
+  # file is opened without O_CREAT and the opened file itself, not the path, is
+  # checked to be the agent user's before flock takes it by descriptor.
+  agent_uid=$("$ID" -u "$run_as") || die "user $run_as does not exist (nothing was changed)"
+  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
+    # shellcheck disable=SC2016 # $1 is expanded by the inner sh, on purpose
+    "$RUNUSER" -u "$run_as" -- /bin/sh -c 'umask 077; : >> "$1"' sh "$lock" \
+      || die "could not create the deploy lock $lock as $run_as (nothing was changed)"
+  fi
+  [ -L "$lock" ] && die "the deploy lock $lock is a symlink; remove it and apply again (nothing was changed)"
+  [ -f "$lock" ] || die "the deploy lock $lock is not a regular file (nothing was changed)"
+  exec 9<"$lock" || die "cannot open the deploy lock $lock (nothing was changed)"
+  opened=$(stat -L -c '%u:%F' "/proc/$$/fd/9") || die "cannot inspect the opened deploy lock $lock (nothing was changed)"
+  case "$opened" in
+    "$agent_uid:regular file"|"$agent_uid:regular empty file") ;;
+    *) die "the deploy lock $lock is not a regular file owned by $run_as ($opened) (nothing was changed)" ;;
+  esac
   rc=0
-  "$FLOCK" -n -E 75 "$lock" /bin/sh "$0" _own-locked "$run_as" "$group" "$@" || rc=$?
+  "$FLOCK" -n -E 75 9 || rc=$?
   if [ "$rc" -eq 75 ]; then
     printf 'stagehand-webhook-cutover: a deploy is running on the agent; apply again when it finishes (nothing was changed)\n' >&2
     exit 75
   fi
-  exit "$rc"
+  [ "$rc" -eq 0 ] || exit "$rc"
+  /bin/sh "$0" _own-locked "$run_as" "$group" "$@"
 }
 
 [ $# -ge 1 ] || usage
