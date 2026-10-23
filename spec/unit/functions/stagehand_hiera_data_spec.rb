@@ -26,7 +26,7 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
   end
 
   let(:level) { 'nodes/web01.example.com' }
-  let(:secret_body) { JSON.generate([{ 'level' => level, 'key' => 'db::password', 'value' => 'hunter2-resolved' }]) }
+  let(:secret_body) { JSON.generate([{ 'level' => level, 'key' => 'app::setting', 'value' => 'resolved-plaintext-value' }]) }
 
   let(:workdir) { Dir.mktmpdir('psh-hiera-spec') }
 
@@ -58,7 +58,7 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
     before { allow(function).to receive(:fetch).and_return(secret_body) }
 
     it 'returns the folded data unchanged' do
-      expect(function.hiera_data(options(cache_dir), context)).to eq('db::password' => 'hunter2-resolved')
+      expect(function.hiera_data(options(cache_dir), context)).to eq('app::setting' => 'resolved-plaintext-value')
     end
 
     it 'writes the cache file readable only by its owner (0600)' do
@@ -84,14 +84,14 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
       function.hiera_data(options(cache_dir), context)
 
       expect(mode_of(cache_file(cache_dir))).to eq(0o600)
-      expect(JSON.parse(File.read(cache_file(cache_dir)))).to eq('db::password' => 'hunter2-resolved')
+      expect(JSON.parse(File.read(cache_file(cache_dir)))).to eq('app::setting' => 'resolved-plaintext-value')
     end
 
     it 'still serves the last-good cache when the console is unreachable' do
       function.hiera_data(options(cache_dir), context)
       allow(function).to receive(:fetch).and_return(nil)
 
-      expect(function.hiera_data(options(cache_dir), context)).to eq('db::password' => 'hunter2-resolved')
+      expect(function.hiera_data(options(cache_dir), context)).to eq('app::setting' => 'resolved-plaintext-value')
     end
   end
 

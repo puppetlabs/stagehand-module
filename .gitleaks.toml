@@ -30,6 +30,17 @@ useDefault = true
 # positives on the literal filename "r10k_detect.sh" appearing next to the
 # phrase "key found" in this test's case-(d) failure message and comments
 # (deploy-key-detection test, not an actual credential) expires=2027-02-27
+#
+# WAIVER: owner=matthewrstone reason=commit bc4b943a (the RED test commit for
+# audit finding U31, PR "stagehand::webhook: install the Stagehand deploy
+# agent off root (1.1.0)") added a spec containing the fixture pair
+# 'db::password' => '<placeholder>', which generic-api-key flags as a
+# credential; it is a made-up value asserted back from a stubbed lookup, not
+# a secret. The same spec no longer contains it (the next commit renames the
+# key and value), so the working-tree scan is clean and only that one
+# immutable history commit needs the exception; pushed history is not
+# rewritten. expires=2027-04-22
 [allowlist]
 paths = ['''^tasks/r10k_detect_test\.sh$''']
 regexes = ['''r10k_detect\.sh''']
+commits = ['bc4b943adae9bbcc7fb40c80bc6f96d39db8ce02']
