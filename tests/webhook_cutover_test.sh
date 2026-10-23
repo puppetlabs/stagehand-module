@@ -32,8 +32,10 @@
 #      unreadable: exit 1, no chown; chown only ever gets ./name from inside the
 #      entry's own directory (find -execdir), never a multi-component path
 #  10  usage: unknown subcommand and missing arguments exit 2
-#  11  lock safety: a symlinked, non-regular or foreign-owned agent lock is
-#      refused with no chown; a missing one is created as the agent user;
+#  11  lock safety: a symlinked, non-regular (FIFO, directory) or
+#      foreign-owned agent lock is refused with no chown; root never opens the
+#      agent lock: the agent user's own flock takes it (T-57.6.2-54), creating it
+#      when missing, and own gives up if that never answers;
 #      the fork's lock directory must not be writable by others (T-57.6.2-53)
 #
 # The last line is `PASS: webhook cutover` on success.
@@ -123,6 +125,7 @@ export RUNUSER_LOG
 cat > "$SHIMDIR/runuser" <<'SHIM'
 #!/bin/sh
 printf '%s\n' "$*" >> "$RUNUSER_LOG"
+if [ "${SHIM_RUNUSER_HANG:-no}" = yes ]; then exec sleep 600; fi
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
 shift
 exec "$@"
@@ -330,9 +333,10 @@ ln -s /etc/passwd "$WORK/d1/link" || fail "symlink fixture"
 ln "$WORK/d2/x" "$WORK/d2/x.link" || fail "hard link fixture"
 printf '1\n' > "$HARDLINKS_ON"
 
-reset_logs
+reset_logs; : > "$RUNUSER_LOG"
 run_cutover "$WORK/stderr" own "$AGENT_LOCK" agentuser puppet "$WORK/d1" "$WORK/d2"
 expect_rc "own, lock free" 0
+grep -q -- "-u agentuser -- .*flock.* $AGENT_LOCK" "$RUNUSER_LOG" || fail "the agent lock was not taken by the agent user's flock (root must never open it, T-57.6.2-54): $(cat "$RUNUSER_LOG")"
 grep -q -- '-R' "$CHOWN_LOG" && fail "own used a recursive chown: $(cat "$CHOWN_LOG")"
 grep -v -q -- '^-h agentuser:puppet ' "$CHOWN_LOG" && fail "own called chown without -h user:group: $(cat "$CHOWN_LOG")"
 for p in "$WORK/d1" "$WORK/d1/a" "$WORK/d1/sub" "$WORK/d1/sub/b" "$WORK/d1/link" "$WORK/d2"; do
@@ -400,6 +404,27 @@ expect_rc "own, lock missing" 0
 grep -q -- '-u agentuser' "$RUNUSER_LOG" || fail "the missing lock was not created as the agent user: $(cat "$RUNUSER_LOG")"
 [ -f "$SAFE/state/deploy.lock" ] || fail "the missing lock was not created"
 [ -s "$CHOWN_LOG" ] || fail "own did not hand over after creating the lock"
+
+# A FIFO at the lock path is refused at once (no hang), no chown.
+reset_logs
+mkfifo "$SAFE/state/deploy.lock" || fail "mkfifo fixture"
+RC=0
+timeout 20 sh "$CUTOVER" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree" >"$WORK/stdout" 2>"$WORK/stderr" || RC=$?
+expect_rc "own, lock is a FIFO" 1
+[ -s "$CHOWN_LOG" ] && fail "chown ran with a FIFO lock: $(cat "$CHOWN_LOG")"
+rm -f "$SAFE/state/deploy.lock"
+
+# If taking the lock never answers (a FIFO swapped in after the check), own
+# gives up after STAGEHAND_CUTOVER_LOCK_WAIT seconds, changes nothing, and
+# leaves no child behind holding anything.
+reset_logs; : > "$RUNUSER_LOG"
+: > "$SAFE/state/deploy.lock"
+RC=0
+SHIM_RUNUSER_HANG=yes STAGEHAND_CUTOVER_LOCK_WAIT=2 timeout 30 sh "$CUTOVER" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree" >"$WORK/stdout" 2>"$WORK/stderr" || RC=$?
+expect_rc "own, lock never answers" 1
+[ -s "$CHOWN_LOG" ] && fail "chown ran although the lock was never confirmed: $(cat "$CHOWN_LOG")"
+grep -q 'deploy lock' "$WORK/stderr" || fail "the give-up message does not name the deploy lock: $(cat "$WORK/stderr")"
+rm -f "$SAFE/state/deploy.lock"
 
 # The fork's lock directory must not be writable by anyone but its owner.
 reset_logs
