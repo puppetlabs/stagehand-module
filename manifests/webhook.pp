@@ -93,7 +93,11 @@
 #   on Puppet 7 (r10k 5 needs Ruby 3.1, which Puppet 7 agents do not ship).
 # @param r10k_config
 #   Path of the r10k config file. The agent user reads it through the `puppet`
-#   group (it holds the control repository URL, no secret).
+#   group (it holds the control repository URL, no secret). The class manages
+#   the file's directory (root:puppet, 0750), so the file must sit in a
+#   directory of its own, such as `/etc/stagehand/r10k.yaml`; a shared
+#   directory such as `/etc` or `/etc/puppetlabs` is refused. That directory
+#   must not be `cachedir`.
 # @param cachedir
 #   r10k's git cache directory, owned by `run_as`. Set explicitly because
 #   r10k's own default is the running user's home directory.
@@ -101,13 +105,15 @@
 #   The Puppet environments directory r10k deploys into, owned by `run_as`.
 #   Only this directory is handed over, never `/etc/puppetlabs/code` itself.
 # @param port
-#   TCP port the agent listens on.
+#   TCP port the agent listens on, 1 to 65535.
 # @param ops_listen
 #   `host:port` of the agent's plain-HTTP ops listener (`/healthz`, `/readyz`,
 #   `/metrics`). It has no authentication, so the default is loopback only.
 # @param deploy_timeout
 #   Longest a single environment deploy may run before the agent kills it, as a
-#   Go duration such as `15m` or `1h`.
+#   duration made of whole seconds, minutes and hours, such as `15m`, `1h` or
+#   `2m30s`. At least one second: the agent refuses zero, a sub-second unit
+#   (`500ms`) and a bare number.
 # @param state_dir
 #   The agent's state directory (`deploys.state_dir`): job records
 #   (`jobs/<id>.json`), the cross-process deploy lock and one lock file per
@@ -178,9 +184,9 @@ class stagehand::webhook (
   Stdlib::Unixpath                 $r10k_config          = '/etc/puppetlabs/r10k/r10k.yaml',
   Stdlib::Unixpath                 $cachedir             = '/opt/puppetlabs/puppet/cache/r10k',
   Stdlib::Unixpath                 $basedir              = '/etc/puppetlabs/code/environments',
-  Stdlib::Port                     $port                 = 8088,
+  Integer[1, 65535]                $port                 = 8088,
   Pattern[/\A(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):[0-9]{1,5}\z/] $ops_listen = '127.0.0.1:8089',
-  Pattern[/\A([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+\z/] $deploy_timeout = '15m',
+  Pattern[/\A(?=.*[1-9])([0-9]+(s|m|h))+\z/] $deploy_timeout = '15m',
   Stdlib::Unixpath                 $state_dir            = '/var/lib/stagehand-deploy-agent',
   Integer[1]                       $max_jobs             = 500,
   Array[Pattern[/\A[a-z0-9_]+\z/]] $protected_environments = ['production'],
@@ -243,6 +249,18 @@ class stagehand::webhook (
     if $path =~ /\s/ {
       fail("stagehand::webhook: path parameter '${path}' must not contain whitespace (it is written into a systemd unit)")
     }
+  }
+
+  # The class owns the directory of r10k_config (root:puppet, 0750). Refuse a
+  # directory shared with the rest of the system, and one that is also the
+  # agent-owned cache, instead of changing the ownership of either.
+  $r10k_dir    = dirname($r10k_config)
+  $shared_dirs = ['/', '/etc', '/opt', '/usr', '/var', '/etc/puppetlabs', '/opt/puppetlabs', '/usr/local', '/usr/local/etc', '/var/lib', '/var/cache']
+  if $r10k_dir in $shared_dirs {
+    fail("stagehand::webhook: r10k_config '${r10k_config}' must be in its own directory (the class manages that directory, and '${r10k_dir}' is shared with the system), for example /etc/stagehand/r10k.yaml")
+  }
+  if $r10k_dir == $cachedir {
+    fail("stagehand::webhook: cachedir and the directory of r10k_config are both '${cachedir}'; the cache belongs to ${run_as} and the config directory to root, so set them apart")
   }
 
   $core_r10k    = '/opt/puppetlabs/puppet/bin/r10k'
@@ -359,7 +377,7 @@ class stagehand::webhook (
     mode   => '0700',
   }
 
-  file { '/etc/puppetlabs/r10k':
+  file { $r10k_dir:
     ensure => directory,
     owner  => 'root',
     group  => 'puppet',
@@ -376,18 +394,24 @@ class stagehand::webhook (
       'basedir'        => $basedir,
       'cachedir'       => $cachedir,
     }),
-    require => [Package['r10k'], File['/etc/puppetlabs/r10k', $cachedir]],
+    require => [Package['r10k'], File[$r10k_dir, $cachedir]],
   }
 
   # --- The agent's package: pinned URL, mandatory digest (MD-02). ------------
   $package_dir  = '/var/cache/stagehand-deploy-agent'
   $package_file = "${package_dir}/${package_basename}"
 
+  # Only the current package file is managed inside, and purge removes every
+  # other file: a release bump would otherwise leave the previous package here
+  # for ever (MOD-IN-03).
   file { $package_dir:
-    ensure => directory,
-    owner  => 'root',
-    group  => 'root',
-    mode   => '0750',
+    ensure  => directory,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0750',
+    purge   => true,
+    recurse => true,
+    force   => true,
   }
 
   file { $package_file:
