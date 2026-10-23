@@ -168,6 +168,12 @@ describe 'stagehand::webhook' do
           expect(config.dig('deploys', 'protected_environments')).to eq(['production'])
         end
 
+        it 'names the environments directory environments_dir, the agent 1.0.0 key, not the fork\'s basedir' do
+          deploys = YAML.safe_load(content_of(agent_config)).fetch('deploys')
+          expect(deploys['environments_dir']).to eq('/etc/puppetlabs/code/environments')
+          expect(deploys).not_to have_key('basedir')
+        end
+
         it 'creates the state directory 0700, owned by the agent user' do
           is_expected.to contain_file('/var/lib/stagehand-deploy-agent').with(
             ensure: 'directory', owner: agent_user, group: 'puppet', mode: '0700',

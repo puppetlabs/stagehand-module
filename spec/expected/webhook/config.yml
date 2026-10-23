@@ -28,7 +28,7 @@ engine:
   command_path: '/opt/puppetlabs/puppet/bin/r10k'
   config_path: '/etc/puppetlabs/r10k/r10k.yaml'
 deploys:
-  basedir: '/etc/puppetlabs/code/environments'
+  environments_dir: '/etc/puppetlabs/code/environments'
   # Job records and the cross-process deploy lock live here (0700, the agent's user).
   state_dir: '/var/lib/stagehand-deploy-agent'
   timeout: '15m'
