@@ -60,7 +60,7 @@ engine:
   ssh_config: '<%= $ssh_config.regsubst("'", "''", 'G') %>'
 <%- } -%>
 deploys:
-  basedir: '<%= $basedir.regsubst("'", "''", 'G') %>'
+  environments_dir: '<%= $basedir.regsubst("'", "''", 'G') %>'
   # Job records and the cross-process deploy lock live here (0700, the agent's user).
   state_dir: '<%= $state_dir.regsubst("'", "''", 'G') %>'
   timeout: '<%= $deploy_timeout %>'

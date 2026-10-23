@@ -195,7 +195,7 @@ stagehand::webhook::engine: 'r10k'                    # or 'g10k' with g10k_comm
 # stagehand::webhook::r10k_version: '5.0.3'           # default: 5.0.3 on Puppet 8, 4.1.0 on Puppet 7
 stagehand::webhook::r10k_config: '/etc/puppetlabs/r10k/r10k.yaml'
 stagehand::webhook::cachedir: '/opt/puppetlabs/puppet/cache/r10k'
-stagehand::webhook::basedir: '/etc/puppetlabs/code/environments'
+stagehand::webhook::basedir: '/etc/puppetlabs/code/environments'  # the agent's deploys.environments_dir and r10k's basedir
 stagehand::webhook::port: 8088
 stagehand::webhook::ops_listen: '127.0.0.1:8089'      # health and metrics, loopback only
 stagehand::webhook::deploy_timeout: '15m'
