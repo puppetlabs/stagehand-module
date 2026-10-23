@@ -1,13 +1,17 @@
 <%- |
-  String[1] $host,
   String[1] $identity_file,
   String[1] $known_hosts_file,
 | -%>
 # Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
-# r10k's default git provider (shellgit) ignores r10k.yaml's git.private_key and
-# uses root's ssh configuration, so the control repository's host is set up here.
-Host <%= $host %>
+# The deploy agent passes this file to git with `ssh -F`, so neither a user's ~/.ssh/config
+# nor /etc/ssh/ssh_config is read. Every host is pinned (Host *): a host whose key is not in
+# the known_hosts file named below fails the deploy instead of being trusted on first use.
+# The deploy key arrives as a systemd credential (LoadCredential= in the unit's drop-in).
+Host *
   IdentityFile "<%= $identity_file %>"
   IdentitiesOnly yes
-  UserKnownHostsFile "<%= $known_hosts_file %>"
+  IdentityAgent none
+  BatchMode yes
   StrictHostKeyChecking yes
+  UserKnownHostsFile "<%= $known_hosts_file %>"
+  GlobalKnownHostsFile /dev/null

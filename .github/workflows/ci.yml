@@ -197,6 +197,8 @@ jobs:
             || { echo "::error::package is missing tasks/recert.json"; exit 1; }
           tar tzf "$pkg" | grep -q "${name}-${version}/files/json_escape.sh" \
             || { echo "::error::package is missing files/json_escape.sh"; exit 1; }
+          tar tzf "$pkg" | grep -q "${name}-${version}/files/webhook-cutover.sh" \
+            || { echo "::error::package is missing files/webhook-cutover.sh"; exit 1; }
 
   # POLISH-03: REFERENCE.md must be generated, committed, and never allowed
   # to silently drift from the manifests/tasks/functions it documents.

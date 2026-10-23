@@ -1,0 +1,13 @@
+# Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
+# The deploy agent passes this file to git with `ssh -F`, so neither a user's ~/.ssh/config
+# nor /etc/ssh/ssh_config is read. Every host is pinned (Host *): a host whose key is not in
+# the known_hosts file named below fails the deploy instead of being trusted on first use.
+# The deploy key arrives as a systemd credential (LoadCredential= in the unit's drop-in).
+Host *
+  IdentityFile "/run/credentials/stagehand-deploy-agent.service/deploy_key"
+  IdentitiesOnly yes
+  IdentityAgent none
+  BatchMode yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile "/etc/stagehand-deploy-agent/known_hosts"
+  GlobalKnownHostsFile /dev/null

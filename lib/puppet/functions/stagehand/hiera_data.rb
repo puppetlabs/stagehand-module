@@ -134,9 +134,14 @@ Puppet::Functions.create_function(:'stagehand::hiera_data') do
 
   def write_cache(cfg, level, data, context)
     dir = cfg['cache_dir']
-    FileUtils.mkdir_p(dir, mode: 0o750) unless Dir.exist?(dir)
+    # The cache holds resolved secret:// values in plaintext (audit U31), so
+    # nothing here may depend on the server's umask: a directory this function
+    # creates is closed to group and others (a umask can only remove bits from
+    # the mode, never add them), and the temp file is created 0600 with O_EXCL
+    # (never reusing or following an existing path) before any byte is written.
+    FileUtils.mkdir_p(dir, mode: 0o700) unless Dir.exist?(dir)
     tmp = File.join(dir, ".psh-hiera-#{Process.pid}-#{rand(1_000_000)}")
-    File.write(tmp, JSON.generate(data))
+    File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |f| f.write(JSON.generate(data)) }
     File.rename(tmp, cache_path(cfg, level))
   rescue StandardError => e
     context.explain { "stagehand::hiera_data: cache write failed for '#{level}': #{e.message}" }
