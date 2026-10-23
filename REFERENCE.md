@@ -1354,8 +1354,8 @@ stagehand::webhook::git_ssh_known_host: 'github.com ssh-ed25519 <key from ssh-ke
 
 ```puppet
 stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
-stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v1.1.0/stagehand-deploy-agent_1.1.0_linux_amd64.deb'
-stagehand::webhook::agent_package_sha256: '432e1ae4cce129ab87d4a3b63e336a467123d8378d29f2691f2e737922f1b22e'
+stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v1.0.0/stagehand-deploy-agent_1.0.0_linux_amd64.deb'
+stagehand::webhook::agent_package_sha256: 'f81c7827ab962dbdb048f92508433abecd2ecbed3611a15c19aa2700be249987'
 ```
 
 ##### Classify the primary

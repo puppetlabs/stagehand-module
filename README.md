@@ -62,19 +62,19 @@ process — read it before cutting a tag.
 
   ```yaml
   stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
-  stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v<version>/stagehand-deploy-agent_<version>_linux_amd64.deb'
-  stagehand::webhook::agent_package_sha256: '<sha256 from checksums.txt>'
+  stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v1.0.0/stagehand-deploy-agent_1.0.0_linux_amd64.deb'
+  stagehand::webhook::agent_package_sha256: 'f81c7827ab962dbdb048f92508433abecd2ecbed3611a15c19aa2700be249987'
   ```
 
   ```puppet
   include stagehand::webhook
   ```
 
-  Replace `<version>` with the agent release you pin and `<sha256 from
-  checksums.txt>` with the digest of that exact package from the release's
-  signed `checksums.txt`; the example is the Debian/Ubuntu Intel/AMD package.
-  The guide lists all four package types and the one-time `cosign verify-blob`
-  command to run before pinning. Step-by-step guide, upgrading from the old
+  The example pins agent release `v1.0.0` and is the Debian/Ubuntu Intel/AMD
+  package; for a later release, or another package type, take the digest of that
+  exact package from the release's signed `checksums.txt`. The guide lists all
+  four `v1.0.0` packages with their digests and the one-time `cosign
+  verify-blob` command to run before pinning. Step-by-step guide, upgrading from the old
   service, rollback, certificate signing and human test steps:
   [`docs/stagehand-webhook.md`](docs/stagehand-webhook.md).
 - **`stagehand`** — anchor class; `include stagehand` manages nothing by

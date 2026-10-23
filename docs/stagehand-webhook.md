@@ -109,23 +109,24 @@ You need:
 ## Step 1: pick the agent's package and its digest
 
 Releases are listed at
-<https://github.com/puppet-stagehand/stagehand-deploy-agent/releases>. Pick the
-release you want (`<version>` below stands for it, for example `1.0.0`), then
-the file that matches the primary: the `.deb` for Ubuntu/Debian, the `.rpm` for
+<https://github.com/puppet-stagehand/stagehand-deploy-agent/releases>. This
+guide pins release **1.0.0** (tag `v1.0.0`), the release this version of the
+module was written and tested against. Pick the file that matches the primary: the `.deb` for Ubuntu/Debian, the `.rpm` for
 RHEL, Rocky or Alma, and the CPU type (`amd64`/`x86_64` or `arm64`/`aarch64`).
 
 | Primary | Package | `agent_package_sha256` |
 |---------|---------|------------------------|
-| Debian/Ubuntu, Intel/AMD | `stagehand-deploy-agent_<version>_linux_amd64.deb` | `<sha256 from checksums.txt>` |
-| Debian/Ubuntu, Arm | `stagehand-deploy-agent_<version>_linux_arm64.deb` | `<sha256 from checksums.txt>` |
-| RHEL/Rocky/Alma, Intel/AMD | `stagehand-deploy-agent_<version>_linux_amd64.rpm` | `<sha256 from checksums.txt>` |
-| RHEL/Rocky/Alma, Arm | `stagehand-deploy-agent_<version>_linux_arm64.rpm` | `<sha256 from checksums.txt>` |
+| Debian/Ubuntu, Intel/AMD | `stagehand-deploy-agent_1.0.0_linux_amd64.deb` | `f81c7827ab962dbdb048f92508433abecd2ecbed3611a15c19aa2700be249987` |
+| Debian/Ubuntu, Arm | `stagehand-deploy-agent_1.0.0_linux_arm64.deb` | `84a0e505937fb968c655a956cd58e5321d60a7c4539242032d02bedd1bcb2ac1` |
+| RHEL/Rocky/Alma, Intel/AMD | `stagehand-deploy-agent_1.0.0_linux_amd64.rpm` | `ac5ac93090205f22571807b0fb5572469d6d4ff38709463153615979f8b75884` |
+| RHEL/Rocky/Alma, Arm | `stagehand-deploy-agent_1.0.0_linux_arm64.rpm` | `a583f1a349df53fd6e30a201b512b4d7612eed2eb03a795a8644f7f031dce3ad` |
 
 The link is `agent_package_source` (the file's address under
-`https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v<version>/`)
-and the 64 characters are `agent_package_sha256`. Take the digest from the
-release's own `checksums.txt`, after the signature below verified. A page like
-this one can go stale; `checksums.txt` is the source of truth.
+`https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v1.0.0/`)
+and the 64 characters are `agent_package_sha256`. For a later release, take
+the new file name and digest from that release's own `checksums.txt`, after the
+signature below verified. A page like this one can go stale; `checksums.txt` is
+the source of truth.
 
 **Why the digest matters.** Puppet downloads the package and refuses to install
 it unless its digest matches the one you wrote down. If anybody swaps the file
@@ -139,7 +140,7 @@ agent's release workflow, not to a key someone could lose). You need
 `checksums.txt.sigstore.json` from the release, then run:
 
 ```sh
-TAG=v<version>
+TAG=v1.0.0   # the release you are pinning
 cosign verify-blob \
   --bundle checksums.txt.sigstore.json \
   --certificate-identity "https://github.com/puppet-stagehand/stagehand-deploy-agent/.github/workflows/release.yml@refs/tags/${TAG}" \
@@ -155,8 +156,8 @@ if it is signed.
 
 Then check the package you downloaded against that signed file: run
 `sha256sum -c --ignore-missing checksums.txt` in the folder that holds both; it
-prints `OK` next to each package it finds. The `<sha256 from checksums.txt>` you
-put in Hiera is the digest on that package's line.
+prints `OK` next to each package it finds. The digest you put in
+Hiera is the one on that package's line.
 
 ## Step 2: write the settings (Hiera)
 
@@ -168,8 +169,8 @@ parameter is shown here; the ones marked "default" can be left out.
 # Required
 stagehand::webhook::control_remote: 'git@github.com:example/control-repo.git'
 # Example for a Debian/Ubuntu Intel/AMD primary; pick your row from Step 1
-stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v<version>/stagehand-deploy-agent_<version>_linux_amd64.deb'
-stagehand::webhook::agent_package_sha256: '<sha256 from checksums.txt>'
+stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v1.0.0/stagehand-deploy-agent_1.0.0_linux_amd64.deb'
+stagehand::webhook::agent_package_sha256: 'f81c7827ab962dbdb048f92508433abecd2ecbed3611a15c19aa2700be249987'
 
 # Only for an SSH control_remote (leave all three out for HTTPS)
 stagehand::webhook::git_ssh_host: 'github.com'
