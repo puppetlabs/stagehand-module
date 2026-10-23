@@ -793,6 +793,132 @@ describe 'stagehand::webhook' do
         end
       end
 
+      # Phase 57.6.2 D-02 / D-01 / RESEARCH Pitfall 3: one Puppet run takes a
+      # primary that runs webhook-go as root to the agent. The order is the
+      # point: stop the old service under its own deploy lock, remove its
+      # package, install the agent, import the history, hand over ownership
+      # under the agent's lock, start the agent.
+      context 'the cutover from webhook-go (D-02)' do
+        let(:cutover) { '/usr/local/sbin/stagehand-webhook-cutover' }
+        let(:stop_legacy) { 'Exec[stagehand-webhook-stop-legacy]' }
+        let(:old_package) { 'Package[webhook-go]' }
+        let(:agent_package) { 'Package[stagehand-deploy-agent]' }
+        let(:import) { 'Exec[stagehand-deploy-agent-import-history]' }
+        let(:own) { 'Exec[stagehand-deploy-agent-own]' }
+        let(:marker) { '/etc/stagehand-deploy-agent/.webhook-go-history-imported' }
+
+        it { is_expected.to compile.with_all_deps }
+
+        it 'installs the cutover script root-only from the module' do
+          is_expected.to contain_file(cutover).with(
+            ensure: 'file', owner: 'root', group: 'root', mode: '0750',
+            source: 'puppet:///modules/stagehand/webhook-cutover.sh',
+          )
+        end
+
+        it 'stops the old service only when a legacy unit exists, through the script, with the legacy state dir' do
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').with(
+            command: [cutover, 'stop-legacy', '/var/lib/webhook-go'],
+            onlyif: [[cutover, 'has-legacy']],
+          ).that_requires("File[#{cutover}]")
+        end
+
+        it 'runs the run_as guard first, so nothing is stopped for a catalog that would be refused anyway' do
+          is_expected.to contain_exec('stagehand-deploy-agent-run-as-not-uid0').that_comes_before(stop_legacy)
+        end
+
+        it 'stops the old service before anything is removed, installed or handed over' do
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').that_comes_before(old_package)
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').that_comes_before(agent_package)
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').that_comes_before('File[/etc/puppetlabs/code/environments]')
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').that_comes_before('File[/opt/puppetlabs/puppet/cache/r10k]')
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').that_comes_before(import)
+          is_expected.to contain_exec('stagehand-webhook-stop-legacy').that_comes_before(own)
+        end
+
+        it 'removes the old package with the OS provider, before the agent package is installed (Pitfall 3)' do
+          is_expected.to contain_package('webhook-go').with(ensure: 'absent', provider: debian ? 'dpkg' : 'rpm')
+                                                      .that_comes_before(agent_package)
+        end
+
+        it 'removes the old drop-in directory, config and package cache only after the guarded stop' do
+          is_expected.to contain_file('/etc/systemd/system/webhook-go.service.d').with(ensure: 'absent', force: true)
+                                                                                 .that_requires(stop_legacy)
+          is_expected.to contain_file('/etc/voxpupuli/webhook.yml').with(ensure: 'absent').that_requires(stop_legacy)
+          is_expected.to contain_file('/var/cache/stagehand-webhook').with(ensure: 'absent', force: true).that_requires(stop_legacy)
+        end
+
+        it 'reloads systemd when the old drop-in directory goes' do
+          is_expected.to contain_file('/etc/systemd/system/webhook-go.service.d').that_notifies('Exec[stagehand-deploy-agent-systemd-reload]')
+        end
+
+        it 'imports the history once, after the agent and its config exist, using the legacy state dir' do
+          is_expected.to contain_exec('stagehand-deploy-agent-import-history').with(
+            command: [cutover, 'import', '/var/lib/webhook-go', agent_config, marker],
+            onlyif: [['/usr/bin/test', '-d', '/var/lib/webhook-go/jobs']],
+            creates: marker,
+          ).that_requires(agent_package).that_requires("File[#{agent_config}]")
+        end
+
+        it 'imports before ownership is handed over, and hands over before the service starts' do
+          is_expected.to contain_exec('stagehand-deploy-agent-import-history').that_comes_before(own)
+          is_expected.to contain_exec('stagehand-deploy-agent-own').that_comes_before('Service[stagehand-deploy-agent]')
+        end
+
+        it 'hands over only when something is not owned, under the agent deploy lock, for the three directories' do
+          dirs = ['/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/var/lib/stagehand-deploy-agent']
+          is_expected.to contain_exec('stagehand-deploy-agent-own').with(
+            command: [cutover, 'own', '/var/lib/stagehand-deploy-agent/deploy.lock', agent_user, 'puppet'] + dirs,
+            unless: [[cutover, 'owned', agent_user] + dirs],
+          ).that_requires(agent_package)
+        end
+
+        it 'needs the directories to exist before it hands them over' do
+          is_expected.to contain_exec('stagehand-deploy-agent-own').that_requires('File[/etc/puppetlabs/code/environments]')
+          is_expected.to contain_exec('stagehand-deploy-agent-own').that_requires('File[/opt/puppetlabs/puppet/cache/r10k]')
+          is_expected.to contain_exec('stagehand-deploy-agent-own').that_requires('File[/var/lib/stagehand-deploy-agent]')
+        end
+
+        it 'touches nothing under /root and no File_line (D-03)' do
+          expect(resources_under_root).to be_empty
+          expect(catalogue.resources.select { |r| r.type == 'File_line' }).to be_empty
+        end
+
+        context 'with legacy_state_dir set' do
+          let(:params) { super().merge('legacy_state_dir' => '/srv/webhook-state') }
+
+          it 'uses it for the stop and the import' do
+            is_expected.to contain_exec('stagehand-webhook-stop-legacy').with(command: [cutover, 'stop-legacy', '/srv/webhook-state'])
+            is_expected.to contain_exec('stagehand-deploy-agent-import-history').with(
+              command: [cutover, 'import', '/srv/webhook-state', agent_config, marker],
+              onlyif: [['/usr/bin/test', '-d', '/srv/webhook-state/jobs']],
+            )
+          end
+        end
+
+        context 'with a state_dir that is not the default' do
+          let(:params) { super().merge('state_dir' => '/srv/stagehand/state') }
+
+          it 'takes the agent deploy lock from that directory' do
+            is_expected.to contain_exec('stagehand-deploy-agent-own').with_command(
+              [cutover, 'own', '/srv/stagehand/state/deploy.lock', agent_user, 'puppet',
+               '/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/srv/stagehand/state'],
+            )
+          end
+        end
+
+        context 'with a run_as that is not the default' do
+          let(:params) { super().merge('run_as' => 'deployer') }
+
+          it 'hands over to that user' do
+            is_expected.to contain_exec('stagehand-deploy-agent-own').with_command(
+              [cutover, 'own', '/var/lib/stagehand-deploy-agent/deploy.lock', 'deployer', 'puppet',
+               '/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/var/lib/stagehand-deploy-agent'],
+            )
+          end
+        end
+      end
+
       context 'with a package source whose extension does not match the OS family' do
         let(:params) do
           super().merge('agent_package_source' => "https://releases.example.test/webhook-go.#{debian ? 'rpm' : 'deb'}")
