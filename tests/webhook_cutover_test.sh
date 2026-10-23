@@ -29,7 +29,8 @@
 #   9  own, agent lock HELD: exit 75, no chown; lock free: chown -h user:group on
 #      each directory and each singly linked entry, never -R, never a
 #      hard-linked file (named on stderr instead); protected_hardlinks off or
-#      unreadable: exit 1, no chown
+#      unreadable: exit 1, no chown; chown only ever gets ./name from inside the
+#      entry's own directory (find -execdir), never a multi-component path
 #  10  usage: unknown subcommand and missing arguments exit 2
 #
 # The last line is `PASS: webhook cutover` on success.
@@ -82,10 +83,22 @@ printf 'imported 3; skipped 0 already present, 0 unfinished, 0 unreadable\n'
 exit "${SHIM_AGENT_RC:-0}"
 SHIM
 
-# chown stub: logs its arguments only.
+# chown stub: logs its arguments, with each ./name argument resolved against
+# the directory it ran in, and records any path argument that has a directory
+# part (a root chown must only ever see ./name, T-57.6.2-43).
 cat > "$SHIMDIR/chown" <<'SHIM'
 #!/bin/sh
-printf '%s\n' "$*" >> "$CHOWN_LOG"
+here=$(pwd -P)
+line=""
+for a in "$@"; do
+  case "$a" in
+    ./*/*) printf '%s\n' "$a" >> "$CHOWN_LOG.multi" ; line="$line $a" ;;
+    ./*) line="$line $here/${a#./}" ;;
+    /*) printf '%s\n' "$a" >> "$CHOWN_LOG.multi" ; line="$line $a" ;;
+    *) line="$line $a" ;;
+  esac
+done
+printf '%s\n' "${line# }" >> "$CHOWN_LOG"
 SHIM
 
 chmod 0755 "$SHIMDIR/systemctl" "$SHIMDIR/stagehand-deploy-agent" "$SHIMDIR/chown"
@@ -95,7 +108,7 @@ STAGEHAND_CUTOVER_AGENT="$SHIMDIR/stagehand-deploy-agent"
 STAGEHAND_CUTOVER_CHOWN="$SHIMDIR/chown"
 export STAGEHAND_CUTOVER_SYSTEMCTL STAGEHAND_CUTOVER_AGENT STAGEHAND_CUTOVER_CHOWN
 
-reset_logs() { : > "$SYSTEMCTL_LOG"; : > "$AGENT_LOG"; : > "$CHOWN_LOG"; }
+reset_logs() { : > "$SYSTEMCTL_LOG"; : > "$AGENT_LOG"; : > "$CHOWN_LOG"; rm -f "$CHOWN_LOG.multi"; }
 
 # run_cutover <stderr file> <args...>: runs the script, sets RC.
 run_cutover() {
@@ -298,6 +311,7 @@ for p in "$WORK/d1" "$WORK/d1/a" "$WORK/d1/sub" "$WORK/d1/sub/b" "$WORK/d1/link"
 done
 tr ' ' '\n' < "$CHOWN_LOG" | grep -q "^$WORK/d2/x" && fail "own handed over a hard-linked file: $(cat "$CHOWN_LOG")"
 grep -q "$WORK/d2/x" "$WORK/stderr" || fail "own did not name the skipped hard-linked file: $(cat "$WORK/stderr")"
+[ -s "$CHOWN_LOG.multi" ] && fail "own passed chown a path with directory parts, which a swapped symlink in the tree could redirect: $(cat "$CHOWN_LOG.multi")"
 
 # protected_hardlinks off, or unreadable: refuse before any chown.
 printf '0\n' > "$HARDLINKS_ON"
