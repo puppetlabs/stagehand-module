@@ -157,12 +157,19 @@ cmd_owned() {
 # directory and each singly linked entry, on this filesystem only. A file with
 # more than one link is left alone and named, because its other name may be
 # /etc/shadow (T-57.6.2-42).
+#
+# -execdir, not -exec: find runs chown from inside the directory it already
+# opened, with a ./name argument, so chown resolves one component and -h stops
+# it following that one. With -exec, chown would re-resolve the whole path,
+# and a directory on it swapped for a symlink after find looked would send a
+# root chown anywhere (T-57.6.2-43). PATH is absolute above, which -execdir
+# requires.
 own_locked() {
   run_as=$1
   group=$2
   shift 2
   for dir in "$@"; do
-    find "$dir" -xdev \( -type d -o -links 1 \) -exec "$CHOWN" -h "$run_as:$group" {} +
+    find "$dir" -xdev \( -type d -o -links 1 \) -execdir "$CHOWN" -h "$run_as:$group" {} +
     find "$dir" -xdev ! -type d -links +1 -print | while IFS= read -r skipped; do
       printf 'stagehand-webhook-cutover: left %s as it is: it has more than one hard link\n' "$skipped" >&2
     done
