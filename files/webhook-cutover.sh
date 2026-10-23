@@ -34,8 +34,12 @@
 #       exit 0 when nothing in any DIR, to a depth of 3, belongs to another user
 #       than RUN_AS; exit 1 when something does, or when a DIR cannot be read
 #   own LOCK RUN_AS GROUP DIR...
-#       chown -R RUN_AS:GROUP DIR... while holding LOCK (the agent's deploy
-#       lock), flock -n, exit 75 when a deploy holds it
+#       refuse (exit 1, nothing changed) unless fs.protected_hardlinks is 1;
+#       then, holding LOCK (the agent's deploy lock; flock -n, exit 75 when a
+#       deploy holds it), chown -h RUN_AS:GROUP every directory and every singly
+#       linked entry under each DIR on its own filesystem. Never chown -R: the
+#       agent user can write in these trees. A file with more than one hard
+#       link is left as it is and named on stderr (T-57.6.2-42).
 #
 # Environment overrides, for tests (the convention tasks/discover.sh follows):
 #   STAGEHAND_CUTOVER_SYSTEMCTL   default /usr/bin/systemctl
@@ -43,6 +47,7 @@
 #   STAGEHAND_CUTOVER_FLOCK       default /usr/bin/flock
 #   STAGEHAND_CUTOVER_CHOWN       default /usr/bin/chown
 #   STAGEHAND_CUTOVER_LEGACY_CONFIG  default /etc/voxpupuli/webhook.yml
+#   STAGEHAND_CUTOVER_PROTECTED_HARDLINKS  default /proc/sys/fs/protected_hardlinks
 #
 # Exit codes: 0 done, 1 failed, 2 usage, 75 a deploy is running (nothing changed).
 #
@@ -64,6 +69,7 @@ AGENT=${STAGEHAND_CUTOVER_AGENT:-/usr/bin/stagehand-deploy-agent}
 FLOCK=${STAGEHAND_CUTOVER_FLOCK:-/usr/bin/flock}
 CHOWN=${STAGEHAND_CUTOVER_CHOWN:-/usr/bin/chown}
 LEGACY_CONFIG=${STAGEHAND_CUTOVER_LEGACY_CONFIG:-/etc/voxpupuli/webhook.yml}
+PROTECTED_HARDLINKS=${STAGEHAND_CUTOVER_PROTECTED_HARDLINKS:-/proc/sys/fs/protected_hardlinks}
 LEGACY_UNIT=webhook-go.service
 
 usage() {
@@ -145,14 +151,37 @@ cmd_owned() {
   return 0
 }
 
+# Runs with the agent's deploy lock held (re-executed under flock by own). The
+# agent user can write inside these trees, so root never follows a link out of
+# them and never hands over a file that has a second name: chown -h on each
+# directory and each singly linked entry, on this filesystem only. A file with
+# more than one link is left alone and named, because its other name may be
+# /etc/shadow (T-57.6.2-42).
+own_locked() {
+  run_as=$1
+  group=$2
+  shift 2
+  for dir in "$@"; do
+    find "$dir" -xdev \( -type d -o -links 1 \) -exec "$CHOWN" -h "$run_as:$group" {} +
+    find "$dir" -xdev ! -type d -links +1 -print | while IFS= read -r skipped; do
+      printf 'stagehand-webhook-cutover: left %s as it is: it has more than one hard link\n' "$skipped" >&2
+    done
+  done
+}
+
 cmd_own() {
   [ $# -ge 4 ] || usage
   lock=$1
   run_as=$2
   group=$3
   shift 3
+  # Skipping hard-linked files is only a backstop. With protected_hardlinks on
+  # (the systemd default) the agent user cannot link to a file it does not own
+  # at all; without it, refuse rather than walk a tree it could have seeded.
+  hardlinks=$(cat "$PROTECTED_HARDLINKS" 2>/dev/null) || hardlinks=
+  [ "$hardlinks" = 1 ] || die "fs.protected_hardlinks is not 1 (read '${hardlinks:-nothing}' from $PROTECTED_HARDLINKS), so handing these directories to $run_as as root is not safe; set it with sysctl and apply again (nothing was changed)"
   rc=0
-  "$FLOCK" -n -E 75 "$lock" "$CHOWN" -R "$run_as:$group" "$@" || rc=$?
+  "$FLOCK" -n -E 75 "$lock" /bin/sh "$0" _own-locked "$run_as" "$group" "$@" || rc=$?
   if [ "$rc" -eq 75 ]; then
     printf 'stagehand-webhook-cutover: a deploy is running on the agent; apply again when it finishes (nothing was changed)\n' >&2
     exit 75
@@ -178,5 +207,9 @@ case "$sub" in
     cmd_owned "$@"
     ;;
   own) cmd_own "$@" ;;
+  _own-locked)
+    [ $# -ge 3 ] || usage
+    own_locked "$@"
+    ;;
   *) usage ;;
 esac
