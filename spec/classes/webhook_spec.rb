@@ -321,6 +321,141 @@ describe 'stagehand::webhook' do
         it { is_expected.to compile.and_raise_error(%r{systemd 247.*found none}) }
       end
 
+      context 'with an r10k_config outside /etc/puppetlabs/r10k (MOD-WR-02)' do
+        let(:params) { super().merge('r10k_config' => '/etc/stagehand/r10k.yaml') }
+
+        it { is_expected.to compile.with_all_deps }
+
+        it "manages that file's own directory, readable through the puppet group, before the file" do
+          is_expected.to contain_file('/etc/stagehand').with(ensure: 'directory', owner: 'root', group: 'puppet', mode: '0750')
+          is_expected.to contain_file('/etc/stagehand/r10k.yaml').that_requires('File[/etc/stagehand]')
+        end
+
+        it 'no longer manages the default r10k directory' do
+          is_expected.not_to contain_file('/etc/puppetlabs/r10k')
+        end
+
+        it 'points the agent at that file' do
+          expect(YAML.safe_load(content_of(agent_config)).dig('engine', 'config_path')).to eq('/etc/stagehand/r10k.yaml')
+        end
+      end
+
+      context 'with the default r10k_config' do
+        it 'manages the directory of the config file exactly once' do
+          expect(catalogue.resources.select { |r| r.type == 'File' && r.title == '/etc/puppetlabs/r10k' }.length).to eq(1)
+          is_expected.to contain_file(r10k_yaml).that_requires('File[/etc/puppetlabs/r10k]')
+        end
+      end
+
+      context 'with a cachedir that is the r10k_config directory (MOD-WR-03)' do
+        let(:params) { super().merge('cachedir' => '/etc/puppetlabs/r10k') }
+
+        it { is_expected.to compile.and_raise_error(%r{cachedir.*r10k_config|r10k_config.*cachedir}) }
+      end
+
+      ['/etc/r10k.yaml', '/r10k.yaml', '/etc/puppetlabs/r10k.yaml', '/opt/puppetlabs/r10k.yaml'].each do |config|
+        context "with r10k_config #{config}, whose directory is shared with the rest of the system" do
+          let(:params) { super().merge('r10k_config' => config) }
+
+          it 'is refused rather than taking ownership of that directory' do
+            is_expected.to compile.and_raise_error(%r{r10k_config.*own directory})
+          end
+        end
+      end
+
+      context 'with port 0 (MOD-IN-02)' do
+        let(:params) { super().merge('port' => 0) }
+
+        it { is_expected.to compile.and_raise_error(%r{port}) }
+      end
+
+      context 'with port 65536' do
+        let(:params) { super().merge('port' => 65_536) }
+
+        it { is_expected.to compile.and_raise_error(%r{port}) }
+      end
+
+      %w[0s 0m 0h 00s 500ms 2us 1.5s 15 m].each do |timeout|
+        context "with deploy_timeout #{timeout.inspect}" do
+          let(:params) { super().merge('deploy_timeout' => timeout) }
+
+          it { is_expected.to compile.and_raise_error(%r{deploy_timeout}) }
+        end
+      end
+
+      %w[1s 90s 15m 1h 2m30s 1h0m1s].each do |timeout|
+        context "with deploy_timeout #{timeout.inspect}" do
+          let(:params) { super().merge('deploy_timeout' => timeout) }
+
+          it { is_expected.to compile.with_all_deps }
+
+          it 'renders it for the agent' do
+            expect(YAML.safe_load(content_of(agent_config)).dig('deploys', 'timeout')).to eq(timeout)
+          end
+        end
+      end
+
+      context 'the package cache directory (MOD-IN-03)' do
+        it 'is purged down to the current package file' do
+          is_expected.to contain_file('/var/cache/stagehand-deploy-agent').with(
+            ensure: 'directory', owner: 'root', group: 'root', mode: '0750', purge: true, recurse: true, force: true,
+          )
+        end
+
+        it 'has the current package file as its only managed child' do
+          children = catalogue.resources.select do |r|
+            r.type == 'File' && (r[:path] || r.title).to_s.start_with?('/var/cache/stagehand-deploy-agent/')
+          end
+          expect(children.map(&:title)).to eq([pkg_path])
+        end
+      end
+
+      context 'the rendered r10k.yaml (MOD-IN-04)' do
+        it 'is structurally valid YAML with the control source nested under sources' do
+          config = YAML.safe_load(content_of(r10k_yaml))
+          expect(config.dig('sources', 'control', 'remote')).to eq(control_remote)
+          expect(config.dig('sources', 'control', 'basedir')).to eq('/etc/puppetlabs/code/environments')
+          expect(config.dig('sources', 'control', 'prefix')).to be(false)
+          expect(config['cachedir']).to eq('/opt/puppetlabs/puppet/cache/r10k')
+        end
+      end
+
+      context 'with an http:// agent_package_source (T-57.6-18)' do
+        let(:params) { super().merge('agent_package_source' => "http://releases.example.test/stagehand-deploy-agent.#{debian ? 'deb' : 'rpm'}") }
+
+        it { is_expected.to compile.and_raise_error(%r{agent_package_source}) }
+      end
+
+      context 'on an unsupported OS family' do
+        let(:facts) do
+          os_facts.merge(puppetversion: '8.10.0', stagehand_systemd_version: 255, os: os_facts[:os].merge('family' => 'Suse'))
+        end
+
+        it { is_expected.to compile.and_raise_error(%r{unsupported OS family 'Suse'}) }
+      end
+
+      context 'with engine g10k and an SSH control remote' do
+        let(:params) do
+          super().merge(
+            'engine' => 'g10k',
+            'g10k_command_path' => '/usr/local/bin/g10k',
+            'control_remote' => 'git@github.com:example/control-repo.git',
+            'git_ssh_host' => 'github.com',
+            'git_ssh_key' => '/etc/stagehand-deploy-agent/deploy_key',
+            'git_ssh_known_host' => 'github.com ssh-ed25519 AAAAexamplehostkey',
+          )
+        end
+
+        it { is_expected.to compile.with_all_deps }
+
+        it 'renders g10k and the pinned ssh_config together' do
+          engine = YAML.safe_load(content_of(agent_config)).fetch('engine')
+          expect(engine).to include('name' => 'g10k', 'command_path' => '/usr/local/bin/g10k', 'ssh_config' => ssh_config_path)
+          is_expected.to contain_file(ssh_config_path)
+          expect(content_of(dropin)).to include('LoadCredential=deploy_key:/etc/stagehand-deploy-agent/deploy_key')
+        end
+      end
+
       context 'on the CA host' do
         let(:facts) { super().merge(stagehand_puppetserver_ca: true) }
 
