@@ -26,7 +26,10 @@
 #      failing: exit non-zero and no marker
 #   8  owned: 0 when everything to depth 3 belongs to the user, 1 otherwise, 1
 #      for a missing directory (as root also: depth 3 counts, depth 4 does not)
-#   9  own, agent lock HELD: exit 75, no chown; lock free: chown -R user:group dirs
+#   9  own, agent lock HELD: exit 75, no chown; lock free: chown -h user:group on
+#      each directory and each singly linked entry, never -R, never a
+#      hard-linked file (named on stderr instead); protected_hardlinks off or
+#      unreadable: exit 1, no chown
 #  10  usage: unknown subcommand and missing arguments exit 2
 #
 # The last line is `PASS: webhook cutover` on success.
@@ -135,6 +138,12 @@ LEGACY_CONFIG="$WORK/webhook.yml"
 printf 'server:\n  port: 8088\n' > "$LEGACY_CONFIG"
 STAGEHAND_CUTOVER_LEGACY_CONFIG="$LEGACY_CONFIG"
 export STAGEHAND_CUTOVER_LEGACY_CONFIG
+
+# fs.protected_hardlinks, as own reads it; on (1) unless a case says otherwise.
+HARDLINKS_ON="$WORK/protected_hardlinks"
+printf '1\n' > "$HARDLINKS_ON"
+STAGEHAND_CUTOVER_PROTECTED_HARDLINKS="$HARDLINKS_ON"
+export STAGEHAND_CUTOVER_PROTECTED_HARDLINKS
 
 # --- 1. has-legacy ---------------------------------------------------------
 info "1. has-legacy"
@@ -267,10 +276,43 @@ grep -q 'a deploy is running on the agent' "$WORK/stderr" || fail "the refusal d
 grep -q 'nothing was changed' "$WORK/stderr" || fail "the refusal does not say 'nothing was changed': $(cat "$WORK/stderr")"
 [ -s "$CHOWN_LOG" ] && fail "chown ran while the agent's deploy lock was held: $(cat "$CHOWN_LOG")"
 
+# Lock free. The trees hold a plain file, a nested directory, a symlink and a
+# hard-linked pair. A root walk must not follow the link or hand over a file
+# with a second name: on a box without protected_hardlinks the agent user could
+# make that second name point at /etc/shadow (T-57.6.2-42).
+mkdir -p "$WORK/d1/sub" "$WORK/d2" || fail "mkdir own trees"
+: > "$WORK/d1/a"
+: > "$WORK/d1/sub/b"
+ln -s /etc/passwd "$WORK/d1/link" || fail "symlink fixture"
+: > "$WORK/d2/x"
+ln "$WORK/d2/x" "$WORK/d2/x.link" || fail "hard link fixture"
+printf '1\n' > "$HARDLINKS_ON"
+
 reset_logs
 run_cutover "$WORK/stderr" own "$AGENT_LOCK" agentuser puppet "$WORK/d1" "$WORK/d2"
 expect_rc "own, lock free" 0
-[ "$(cat "$CHOWN_LOG")" = "-R agentuser:puppet $WORK/d1 $WORK/d2" ] || fail "own called chown with the wrong arguments: $(cat "$CHOWN_LOG")"
+grep -q -- '-R' "$CHOWN_LOG" && fail "own used a recursive chown: $(cat "$CHOWN_LOG")"
+grep -v -q -- '^-h agentuser:puppet ' "$CHOWN_LOG" && fail "own called chown without -h user:group: $(cat "$CHOWN_LOG")"
+for p in "$WORK/d1" "$WORK/d1/a" "$WORK/d1/sub" "$WORK/d1/sub/b" "$WORK/d1/link" "$WORK/d2"; do
+  tr ' ' '\n' < "$CHOWN_LOG" | grep -qx "$p" || fail "own did not hand over $p: $(cat "$CHOWN_LOG")"
+done
+tr ' ' '\n' < "$CHOWN_LOG" | grep -q "^$WORK/d2/x" && fail "own handed over a hard-linked file: $(cat "$CHOWN_LOG")"
+grep -q "$WORK/d2/x" "$WORK/stderr" || fail "own did not name the skipped hard-linked file: $(cat "$WORK/stderr")"
+
+# protected_hardlinks off, or unreadable: refuse before any chown.
+printf '0\n' > "$HARDLINKS_ON"
+reset_logs
+run_cutover "$WORK/stderr" own "$AGENT_LOCK" agentuser puppet "$WORK/d1" "$WORK/d2"
+expect_rc "own, protected_hardlinks off" 1
+grep -q 'protected_hardlinks' "$WORK/stderr" || fail "the refusal does not name protected_hardlinks: $(cat "$WORK/stderr")"
+[ -s "$CHOWN_LOG" ] && fail "chown ran with protected_hardlinks off: $(cat "$CHOWN_LOG")"
+
+rm -f "$HARDLINKS_ON"
+reset_logs
+run_cutover "$WORK/stderr" own "$AGENT_LOCK" agentuser puppet "$WORK/d1" "$WORK/d2"
+expect_rc "own, protected_hardlinks unreadable" 1
+[ -s "$CHOWN_LOG" ] && fail "chown ran with protected_hardlinks unreadable: $(cat "$CHOWN_LOG")"
+printf '1\n' > "$HARDLINKS_ON"
 
 # --- 10. usage --------------------------------------------------------------
 info "10. usage"
