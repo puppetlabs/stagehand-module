@@ -464,7 +464,7 @@ unauthenticated. It serves exactly three things:
 |---------|-------------------|
 | `GET /healthz` | `ok` while the process is alive. |
 | `GET /readyz` | `200` with `{"ready":true,"failing":[]}` when the agent can do its job, or `503` naming what is wrong (`engine`, `environments_dir`, `certificate`, `crl`, or `draining` while shutting down). |
-| `GET /metrics` | Prometheus text: deploy counts and durations, refusals, and the days left on the server certificate (`stagehand_deploy_agent_server_certificate_days_until_expiry`) and on the CRL (`stagehand_deploy_agent_crl_days_until_expiry`). |
+| `GET /metrics` | Prometheus text: deploy counts and durations, refusals, and the seconds left on the server certificate (`stagehand_deploy_agent_server_certificate_seconds_until_expiry`) and on the CRL (`stagehand_deploy_agent_crl_seconds_until_expiry`). |
 
 From the primary: `curl -s http://127.0.0.1:8089/readyz`. These three paths are
 not available on the deploy port (8088), which answers only to allow-listed
@@ -561,7 +561,7 @@ old service. Each step says what you should see.
    owned by `stagehand-deploy-agent:puppet` with modes `drwxr-x---`, `drwxr-x---`
    and `drwx------`.
 3. Run `curl -s http://127.0.0.1:8089/healthz`, `curl -s http://127.0.0.1:8089/readyz`
-   and `curl -s http://127.0.0.1:8089/metrics | grep days_until_expiry`.
+   and `curl -s http://127.0.0.1:8089/metrics | grep seconds_until_expiry`.
    **Expect:** `ok`; `{"ready":true,"failing":[]}`; the certificate expiry
    number is positive.
 4. Run (no client certificate):
