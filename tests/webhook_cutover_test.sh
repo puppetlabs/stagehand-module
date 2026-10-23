@@ -18,7 +18,8 @@
 #      to webhook.yml.pre-agent with mode 0600, exit 0
 #   4  stop-legacy, lock HELD: exit 75, message names the running deploy and
 #      "nothing was changed", no stop, no disable, no copy
-#   5  stop-legacy, state dir missing and service inactive: proceeds without a lock
+#   5  stop-legacy, state dir missing and service inactive (never started):
+#      the directory is created, config copied, service stopped and disabled
 #   6  stop-legacy, state dir missing and service active: exit 1, nothing called
 #   7  import with a jobs directory: agent called with the exact arguments,
 #      marker created; without one: agent not called, marker created; agent
@@ -106,9 +107,14 @@ expect_rc() { # <label> <wanted>
 }
 
 # hold_lock <file>: a real flock(1) holder in the background, and wait until the
-# lock is really taken, so the case under test cannot race the holder.
+# lock is really taken, so the case under test cannot race the holder. The
+# holder runs until its sentinel file is removed (release_lock); killing it
+# would not do, because flock(1) may run its command as a child and the child
+# would keep the lock.
 hold_lock() {
-  flock "$1" sleep 30 &
+  : > "$WORK/hold"
+  # shellcheck disable=SC2016 # $0 is expanded by the inner sh, on purpose
+  flock "$1" sh -c 'while [ -e "$0" ]; do sleep 0.05; done' "$WORK/hold" &
   HOLDER_PID=$!
   tries=0
   while flock -n "$1" true 2>/dev/null; do
@@ -118,7 +124,7 @@ hold_lock() {
   done
 }
 release_lock() {
-  kill "$HOLDER_PID" 2>/dev/null
+  rm -f "$WORK/hold"
   wait "$HOLDER_PID" 2>/dev/null
   HOLDER_PID=""
 }
@@ -179,15 +185,17 @@ grep -Eq '^(stop|disable) ' "$SYSTEMCTL_LOG" && fail "a service was stopped or d
 # --- 5. state dir missing, service inactive -----------------------------------
 info "5. stop-legacy, state directory missing, service not running"
 reset_logs
-SHIM_LEGACY=present SHIM_ACTIVE=no run_cutover "$WORK/stderr" stop-legacy "$WORK/no-such-state-dir"
+SHIM_LEGACY=present SHIM_ACTIVE=no run_cutover "$WORK/stderr" stop-legacy "$WORK/never-started-state-dir"
 expect_rc "stop-legacy, no state dir, inactive" 0
+[ -f "$WORK/never-started-state-dir/webhook.yml.pre-agent" ] || fail "the rollback copy should be kept even when the state directory had to be created"
 grep -qx 'stop webhook-go.service' "$SYSTEMCTL_LOG" || fail "an inactive unit with no state dir should still be stopped"
 grep -qx 'disable webhook-go.service' "$SYSTEMCTL_LOG" || fail "an inactive unit with no state dir should still be disabled"
 
 # --- 6. state dir missing, service active ------------------------------------
 info "6. stop-legacy, state directory missing, service running"
 reset_logs
-SHIM_LEGACY=present SHIM_ACTIVE=yes run_cutover "$WORK/stderr" stop-legacy "$WORK/no-such-state-dir"
+SHIM_LEGACY=present SHIM_ACTIVE=yes run_cutover "$WORK/stderr" stop-legacy "$WORK/wrong-state-dir"
+[ -e "$WORK/wrong-state-dir" ] && fail "a refused run must not create the state directory"
 expect_rc "stop-legacy, no state dir, active" 1
 grep -q 'legacy_state_dir' "$WORK/stderr" || fail "the message must name legacy_state_dir: $(cat "$WORK/stderr")"
 grep -Eq '^(stop|disable) ' "$SYSTEMCTL_LOG" && fail "a running unit was stopped although its lock could not be located"
