@@ -50,6 +50,7 @@
 #   STAGEHAND_CUTOVER_PROTECTED_HARDLINKS  default /proc/sys/fs/protected_hardlinks
 #   STAGEHAND_CUTOVER_ID          default /usr/bin/id
 #   STAGEHAND_CUTOVER_RUNUSER     default /usr/sbin/runuser
+#   STAGEHAND_CUTOVER_LOCK_WAIT   default 30 (seconds own waits for the agent user's flock to answer)
 #
 # Exit codes: 0 done, 1 failed, 2 usage, 75 a deploy is running (nothing changed).
 #
@@ -74,6 +75,7 @@ LEGACY_CONFIG=${STAGEHAND_CUTOVER_LEGACY_CONFIG:-/etc/voxpupuli/webhook.yml}
 PROTECTED_HARDLINKS=${STAGEHAND_CUTOVER_PROTECTED_HARDLINKS:-/proc/sys/fs/protected_hardlinks}
 ID=${STAGEHAND_CUTOVER_ID:-/usr/bin/id}
 RUNUSER=${STAGEHAND_CUTOVER_RUNUSER:-/usr/sbin/runuser}
+LOCK_WAIT=${STAGEHAND_CUTOVER_LOCK_WAIT:-30}
 LEGACY_UNIT=webhook-go.service
 
 usage() {
@@ -206,35 +208,52 @@ cmd_own() {
   # at all; without it, refuse rather than walk a tree it could have seeded.
   hardlinks=$(cat "$PROTECTED_HARDLINKS" 2>/dev/null) || hardlinks=
   [ "$hardlinks" = 1 ] || die "fs.protected_hardlinks is not 1 (read '${hardlinks:-nothing}' from $PROTECTED_HARDLINKS), so handing these directories to $run_as as root is not safe; set it with sysctl and apply again (nothing was changed)"
-  # The lock lives in a directory the agent user can write, and flock(1) would
-  # open it with O_CREAT and follow a symlink: a planted link would have root
-  # create any file it names, /etc/nologin for one (T-57.6.2-53). So root never
-  # creates or follows it. A missing lock (the agent has not deployed yet) is
-  # created as the agent user; anything but a regular file is refused; the
-  # file is opened without O_CREAT and the opened file itself, not the path, is
-  # checked to be the agent user's before flock takes it by descriptor.
+  # The lock lives in a directory the agent user can write. Root never opens
+  # that path: flock(1) would create it and follow a symlink (T-57.6.2-53), and
+  # even a read-only open after a check can be raced onto a device node or a
+  # FIFO (T-57.6.2-54). The agent user's own flock(1) takes the lock instead,
+  # with only that user's rights (creating the file, 0600, if the agent has not
+  # deployed yet), and holds it while root works: it reports "locked" through a
+  # pipe in a root-only temporary directory, and the lock is released when root
+  # closes the other pipe. flock(2) on the same file excludes a deploy whichever
+  # process holds it. The checks below only give a clear message for the
+  # common cases; the safety comes from who opens the file.
   agent_uid=$("$ID" -u "$run_as") || die "user $run_as does not exist (nothing was changed)"
-  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
-    # shellcheck disable=SC2016 # $1 is expanded by the inner sh, on purpose
-    "$RUNUSER" -u "$run_as" -- /bin/sh -c 'umask 077; : >> "$1"' sh "$lock" \
-      || die "could not create the deploy lock $lock as $run_as (nothing was changed)"
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    [ -L "$lock" ] && die "the deploy lock $lock is a symlink; remove it and apply again (nothing was changed)"
+    [ -f "$lock" ] || die "the deploy lock $lock is not a regular file; remove it and apply again (nothing was changed)"
+    [ "$(stat -c '%u' "$lock")" = "$agent_uid" ] || die "the deploy lock $lock is not owned by $run_as; remove it and apply again (nothing was changed)"
   fi
-  [ -L "$lock" ] && die "the deploy lock $lock is a symlink; remove it and apply again (nothing was changed)"
-  [ -f "$lock" ] || die "the deploy lock $lock is not a regular file (nothing was changed)"
-  exec 9<"$lock" || die "cannot open the deploy lock $lock (nothing was changed)"
-  opened=$(stat -L -c '%u:%F' "/proc/$$/fd/9") || die "cannot inspect the opened deploy lock $lock (nothing was changed)"
-  case "$opened" in
-    "$agent_uid:regular file"|"$agent_uid:regular empty file") ;;
-    *) die "the deploy lock $lock is not a regular file owned by $run_as ($opened) (nothing was changed)" ;;
-  esac
+  pipes=$(mktemp -d) || die "cannot create a private directory for the lock handshake (nothing was changed)"
+  trap 'rm -rf "$pipes"' EXIT
+  mkfifo "$pipes/ready" "$pipes/release" || die "cannot create the lock handshake pipes (nothing was changed)"
+  # shellcheck disable=SC2016 # $0 and the redirections are for the inner sh, on purpose
+  "$RUNUSER" -u "$run_as" -- "$FLOCK" -n -E 75 "$lock" \
+    /bin/sh -c 'printf "locked\n"; read -r _ <&3' 3<"$pipes/release" >"$pipes/ready" 2>/dev/null &
+  holder=$!
+  exec 8>"$pipes/release"
+  exec 7<"$pipes/ready"
+  answer=$(timeout "$LOCK_WAIT" head -n 1 <&7) || answer=
+  if [ "$answer" != locked ]; then
+    exec 8>&-
+    hrc=0
+    if kill -0 "$holder" 2>/dev/null; then
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      die "the deploy lock $lock did not answer within ${LOCK_WAIT}s (nothing was changed)"
+    fi
+    wait "$holder" || hrc=$?
+    if [ "$hrc" -eq 75 ]; then
+      printf 'stagehand-webhook-cutover: a deploy is running on the agent; apply again when it finishes (nothing was changed)\n' >&2
+      exit 75
+    fi
+    die "could not take the deploy lock $lock as $run_as (exit $hrc; nothing was changed)"
+  fi
   rc=0
-  "$FLOCK" -n -E 75 9 || rc=$?
-  if [ "$rc" -eq 75 ]; then
-    printf 'stagehand-webhook-cutover: a deploy is running on the agent; apply again when it finishes (nothing was changed)\n' >&2
-    exit 75
-  fi
-  [ "$rc" -eq 0 ] || exit "$rc"
-  /bin/sh "$0" _own-locked "$run_as" "$group" "$@"
+  /bin/sh "$0" _own-locked "$run_as" "$group" "$@" || rc=$?
+  exec 8>&-
+  wait "$holder" 2>/dev/null || true
+  exit "$rc"
 }
 
 [ $# -ge 1 ] || usage

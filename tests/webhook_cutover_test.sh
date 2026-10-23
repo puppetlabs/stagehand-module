@@ -407,6 +407,7 @@ grep -q -- '-u agentuser' "$RUNUSER_LOG" || fail "the missing lock was not creat
 
 # A FIFO at the lock path is refused at once (no hang), no chown.
 reset_logs
+rm -f "$SAFE/state/deploy.lock"
 mkfifo "$SAFE/state/deploy.lock" || fail "mkfifo fixture"
 RC=0
 timeout 20 sh "$CUTOVER" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree" >"$WORK/stdout" 2>"$WORK/stderr" || RC=$?
