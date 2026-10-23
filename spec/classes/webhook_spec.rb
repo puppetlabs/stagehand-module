@@ -148,10 +148,8 @@ describe 'stagehand::webhook' do
           )
         end
 
-        it 'does not manage the old webhook-go service, package or config' do
+        it 'does not run or enable the old webhook-go service (the cutover only stops, disables and removes it)' do
           is_expected.not_to contain_service('webhook-go')
-          is_expected.not_to contain_package('webhook-go')
-          is_expected.not_to contain_file('/etc/voxpupuli/webhook.yml')
         end
 
         it 'writes the agent config (0640 root:puppet) exactly as the reviewed fixture' do
@@ -799,20 +797,40 @@ describe 'stagehand::webhook' do
       # package, install the agent, import the history, hand over ownership
       # under the agent's lock, start the agent.
       context 'the cutover from webhook-go (D-02)' do
-        let(:cutover) { '/usr/local/sbin/stagehand-webhook-cutover' }
-        let(:stop_legacy) { 'Exec[stagehand-webhook-stop-legacy]' }
-        let(:old_package) { 'Package[webhook-go]' }
-        let(:agent_package) { 'Package[stagehand-deploy-agent]' }
-        let(:import) { 'Exec[stagehand-deploy-agent-import-history]' }
-        let(:own) { 'Exec[stagehand-deploy-agent-own]' }
-        let(:marker) { '/etc/stagehand-deploy-agent/.webhook-go-history-imported' }
+        def cutover
+          '/usr/local/sbin/stagehand-webhook-cutover'
+        end
+
+        def stop_legacy
+          'Exec[stagehand-webhook-stop-legacy]'
+        end
+
+        def old_package
+          'Package[webhook-go]'
+        end
+
+        def agent_package
+          'Package[stagehand-deploy-agent]'
+        end
+
+        def import
+          'Exec[stagehand-deploy-agent-import-history]'
+        end
+
+        def own
+          'Exec[stagehand-deploy-agent-own]'
+        end
+
+        def marker
+          '/etc/stagehand-deploy-agent/.webhook-go-history-imported'
+        end
 
         it { is_expected.to compile.with_all_deps }
 
         it 'installs the cutover script root-only from the module' do
           is_expected.to contain_file(cutover).with(
             ensure: 'file', owner: 'root', group: 'root', mode: '0750',
-            source: 'puppet:///modules/stagehand/webhook-cutover.sh',
+            source: 'puppet:///modules/stagehand/webhook-cutover.sh'
           )
         end
 
@@ -902,7 +920,7 @@ describe 'stagehand::webhook' do
           it 'takes the agent deploy lock from that directory' do
             is_expected.to contain_exec('stagehand-deploy-agent-own').with_command(
               [cutover, 'own', '/srv/stagehand/state/deploy.lock', agent_user, 'puppet',
-               '/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/srv/stagehand/state'],
+               '/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/srv/stagehand/state',],
             )
           end
         end
@@ -913,7 +931,7 @@ describe 'stagehand::webhook' do
           it 'hands over to that user' do
             is_expected.to contain_exec('stagehand-deploy-agent-own').with_command(
               [cutover, 'own', '/var/lib/stagehand-deploy-agent/deploy.lock', 'deployer', 'puppet',
-               '/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/var/lib/stagehand-deploy-agent'],
+               '/etc/puppetlabs/code/environments', '/opt/puppetlabs/puppet/cache/r10k', '/var/lib/stagehand-deploy-agent',],
             )
           end
         end

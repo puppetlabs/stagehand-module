@@ -1302,6 +1302,18 @@ code-deploy tool at all (Phase 57.6 D-31), one agent run:
   6. keeps the `stagehand-deploy-agent` service running, restarting it
      whenever its config, its drop-in or its package changes.
 
+**Moving off the old webhook-go service (D-02).** On a primary that already
+runs webhook-go as root, the same run does the cutover, in this order: stop
+and disable webhook-go while holding its own deploy lock (a deploy in flight
+makes the run fail with "a deploy is running on webhook-go; apply again when
+it finishes", having changed nothing); remove the webhook-go package, its
+config, its systemd drop-in and its package cache; install the agent; copy
+the finished deploy records across once (`import-history`); hand the
+environments directory, the r10k cache and the agent's state directory to
+`run_as` under the agent's own deploy lock; start the agent. The old state
+directory and a copy of the old config stay in place for a rollback. On a
+primary that never ran webhook-go every one of these steps does nothing.
+
 **The agent does not run as root (D-01, D-04).** It runs as `run_as` (default
 `stagehand-deploy-agent`, primary group `puppet`). The class hands that user
 the environments directory (`basedir`), the r10k cache (`cachedir`) and the
@@ -1576,8 +1588,11 @@ Default value: `'stagehand-deploy-agent'`
 
 Data type: `Stdlib::Unixpath`
 
-Where an earlier webhook-go install kept its job records. Reserved for the
-cutover from that install; this version of the class does not read it yet.
+Where an earlier webhook-go install kept its job records and its deploy
+lock (`state_dir` in its `webhook.yml`). The cutover takes that lock before
+it stops the old service, imports the finished records from
+`<legacy_state_dir>/jobs` once, and leaves the directory in place as the
+rollback source. Only matters on a primary that ran webhook-go.
 
 Default value: `'/var/lib/webhook-go'`
 

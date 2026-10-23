@@ -50,6 +50,11 @@
 
 set -eu
 
+# Puppet and cron give a script a bare environment; find, cp and the rest come
+# from the system directories.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 # Everything this script creates (the config copy, the marker, a lock file) is
 # private to root unless a step below says otherwise.
 umask 077

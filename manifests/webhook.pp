@@ -24,6 +24,18 @@
 #   6. keeps the `stagehand-deploy-agent` service running, restarting it
 #      whenever its config, its drop-in or its package changes.
 #
+# **Moving off the old webhook-go service (D-02).** On a primary that already
+# runs webhook-go as root, the same run does the cutover, in this order: stop
+# and disable webhook-go while holding its own deploy lock (a deploy in flight
+# makes the run fail with "a deploy is running on webhook-go; apply again when
+# it finishes", having changed nothing); remove the webhook-go package, its
+# config, its systemd drop-in and its package cache; install the agent; copy
+# the finished deploy records across once (`import-history`); hand the
+# environments directory, the r10k cache and the agent's state directory to
+# `run_as` under the agent's own deploy lock; start the agent. The old state
+# directory and a copy of the old config stay in place for a rollback. On a
+# primary that never ran webhook-go every one of these steps does nothing.
+#
 # **The agent does not run as root (D-01, D-04).** It runs as `run_as` (default
 # `stagehand-deploy-agent`, primary group `puppet`). The class hands that user
 # the environments directory (`basedir`), the r10k cache (`cachedir`) and the
@@ -133,8 +145,11 @@
 #   resolves to uid 0 is refused when it is applied (D-04); there is no way to
 #   turn either check off.
 # @param legacy_state_dir
-#   Where an earlier webhook-go install kept its job records. Reserved for the
-#   cutover from that install; this version of the class does not read it yet.
+#   Where an earlier webhook-go install kept its job records and its deploy
+#   lock (`state_dir` in its `webhook.yml`). The cutover takes that lock before
+#   it stops the old service, imports the finished records from
+#   `<legacy_state_dir>/jobs` once, and leaves the directory in place as the
+#   rollback source. Only matters on a primary that ran webhook-go.
 # @param manage_git
 #   Install the `git` package (with `stdlib::ensure_packages`, so another class
 #   that also wants git does not conflict). Set false if git is managed
@@ -325,6 +340,62 @@ class stagehand::webhook (
     ],
   }
 
+  # --- The cutover from webhook-go (D-02, D-01, RESEARCH Pitfall 3). ----------
+  # Order is the whole point. Installing the agent package while webhook-go runs
+  # would run the old package's removal script, which stops the service and kills
+  # a deploy that is in flight. So: stop it first, under its own deploy lock
+  # (exit 75 and a refusal when a deploy holds the lock, and then nothing below
+  # runs); remove the old package and its leftovers; only then install the agent
+  # (further down, ordered after this package). Every step is a no-op on a
+  # primary that never ran webhook-go.
+  $cutover_script = '/usr/local/sbin/stagehand-webhook-cutover'
+  $import_marker  = "${config_dir}/.webhook-go-history-imported"
+
+  file { $cutover_script:
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0750',
+    source => 'puppet:///modules/stagehand/webhook-cutover.sh',
+  }
+
+  exec { 'stagehand-webhook-stop-legacy':
+    command => [$cutover_script, 'stop-legacy', $legacy_state_dir],
+    onlyif  => [[$cutover_script, 'has-legacy']],
+    require => [File[$cutover_script], Exec['stagehand-deploy-agent-run-as-not-uid0']],
+    before  => [User[$run_as], File[$basedir], File[$cachedir], File[$state_dir]],
+  }
+
+  package { 'webhook-go':
+    ensure   => absent,
+    provider => $package_provider,
+    require  => Exec['stagehand-webhook-stop-legacy'],
+    before   => Package['stagehand-deploy-agent'],
+  }
+
+  # What the old package and the old module left behind. The state directory
+  # (`legacy_state_dir`, with webhook.yml.pre-agent in it) is deliberately not
+  # here: it is the rollback source.
+  file { '/etc/systemd/system/webhook-go.service.d':
+    ensure  => absent,
+    force   => true,
+    backup  => false,
+    require => Exec['stagehand-webhook-stop-legacy'],
+    notify  => Exec['stagehand-deploy-agent-systemd-reload'],
+  }
+
+  file { '/etc/voxpupuli/webhook.yml':
+    ensure  => absent,
+    require => [Exec['stagehand-webhook-stop-legacy'], Package['webhook-go']],
+  }
+
+  file { '/var/cache/stagehand-webhook':
+    ensure  => absent,
+    force   => true,
+    backup  => false,
+    require => Exec['stagehand-webhook-stop-legacy'],
+  }
+
   # --- r10k ------------------------------------------------------------------
   if $r10k_version =~ NotUndef {
     $_r10k_version = $r10k_version
@@ -509,6 +580,30 @@ class stagehand::webhook (
       'ssh_config'             => $ssh_config,
     }),
     require => [File[$config_dir], Package['stagehand-deploy-agent']],
+  }
+
+  # --- History and ownership after the install, before the service starts. --
+  # Copy the old service's finished deploy records once (the marker records it;
+  # the legacy directory is only read). `import-history` is allowed as root; the
+  # records it writes are root's until the next step.
+  exec { 'stagehand-deploy-agent-import-history':
+    command => [$cutover_script, 'import', $legacy_state_dir, "${config_dir}/config.yml", $import_marker],
+    onlyif  => [['/usr/bin/test', '-d', "${legacy_state_dir}/jobs"]],
+    creates => $import_marker,
+    require => [Package['stagehand-deploy-agent'], File["${config_dir}/config.yml"]],
+    before  => Exec['stagehand-deploy-agent-own'],
+  }
+
+  # D-01: hand the environments directory, the r10k cache and the state directory
+  # to run_as, recursively, but only when something in them is not already
+  # theirs, and only while no deploy holds the agent's lock (exit 75 otherwise).
+  # After the cutover from root, or on a fresh primary with root-owned
+  # environments, this runs once; afterwards the `unless` skips it.
+  exec { 'stagehand-deploy-agent-own':
+    command => [$cutover_script, 'own', "${state_dir}/deploy.lock", $run_as, 'puppet', $basedir, $cachedir, $state_dir],
+    unless  => [[$cutover_script, 'owned', $run_as, $basedir, $cachedir, $state_dir]],
+    require => [Package['stagehand-deploy-agent'], File[$basedir, $cachedir, $state_dir]],
+    before  => Service['stagehand-deploy-agent'],
   }
 
   # --- systemd drop-in: the service user and the credentials (D-20). --------
