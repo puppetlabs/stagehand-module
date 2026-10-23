@@ -41,31 +41,41 @@ process — read it before cutting a tag.
 - **`stagehand::webhook`** — apply on a **Puppet Core primary** to make it a
   deploy target for the Advanced Code Manager pack. Starting from a primary
   with no code-deploy tool, it installs git and r10k (`puppet_gem`, so the
-  binary is the Core path `/opt/puppetlabs/puppet/bin/r10k`), writes
-  `r10k.yaml`, installs the Stagehand fork of webhook-go from a pinned HTTPS
-  URL whose sha256 must match, and configures it for mutual TLS with the
-  primary's own Puppet certificate: only clients signed by the estate's CA,
-  not revoked (on the CA host it reads the CA's own `ca_crl.pem`), and named
-  on `allowed_certnames` (default `stagehand-code-manager`) may deploy,
-  optionally pinned by SHA-256 fingerprint. It also creates the fork's 0700
-  state directory and a systemd drop-in (`KillMode=mixed`,
-  `TimeoutStopSec=60`, no `ExecReload`). SSH control repositories get a
-  root-only ssh Host block with a pinned host key. Runs as root. Minimal use:
+  binary is the Puppet Core path `/opt/puppetlabs/puppet/bin/r10k`), writes
+  `r10k.yaml`, creates a system user `stagehand-deploy-agent` (group `puppet`)
+  and installs the Stagehand deploy agent from a pinned HTTPS URL whose sha256
+  must match. The agent **does not run as root**: it owns only the environments
+  directory, the r10k cache and its own state directory, and receives the
+  primary's Puppet private key (and the git deploy key, for an SSH remote) as
+  systemd credentials (`LoadCredential=`, so systemd 247 or later; EL8 and
+  Ubuntu 20.04 are refused). It serves a mutual-TLS deploy API on the
+  primary's own Puppet certificate: only clients signed by the estate's CA, not
+  revoked (on the CA host it reads the CA's own `ca_crl.pem`), and named on
+  `allowed_certnames` (default `stagehand-code-manager`) may deploy, optionally
+  pinned by SHA-256 fingerprint; a loopback-only ops port serves `/healthz`,
+  `/readyz` and `/metrics`. SSH control repositories get a dedicated ssh config
+  and known_hosts that the agent passes to git with `ssh -F`, so no other ssh
+  configuration on the primary can weaken the pinned host key. On a primary that
+  still runs the old `webhook-go` service as root, the same Puppet run moves it
+  over (guarded stop, history imported, ownership handed to the agent user) and
+  refuses, changing nothing, while a deploy is in flight. Minimal use:
 
   ```yaml
   stagehand::webhook::control_remote: 'https://github.com/example/control-repo.git'
-  stagehand::webhook::webhook_package_source: 'https://github.com/puppet-stagehand/webhook-go/releases/download/v2.15.1-stagehand.1/webhook-go_2.15.1-stagehand.1_linux_amd64.deb'
-  stagehand::webhook::webhook_package_sha256: '432e1ae4cce129ab87d4a3b63e336a467123d8378d29f2691f2e737922f1b22e'
+  stagehand::webhook::agent_package_source: 'https://github.com/puppet-stagehand/stagehand-deploy-agent/releases/download/v<version>/stagehand-deploy-agent_<version>_linux_amd64.deb'
+  stagehand::webhook::agent_package_sha256: '<sha256 from checksums.txt>'
   ```
 
   ```puppet
   include stagehand::webhook
   ```
 
-  The example is the Debian/Ubuntu Intel/AMD package of release
-  `v2.15.1-stagehand.1`; the guide lists all four packages with their digests
-  and the one-time `cosign verify-blob` command to run before pinning.
-  Step-by-step guide, certificate signing and human test steps:
+  Replace `<version>` with the agent release you pin and `<sha256 from
+  checksums.txt>` with the digest of that exact package from the release's
+  signed `checksums.txt`; the example is the Debian/Ubuntu Intel/AMD package.
+  The guide lists all four package types and the one-time `cosign verify-blob`
+  command to run before pinning. Step-by-step guide, upgrading from the old
+  service, rollback, certificate signing and human test steps:
   [`docs/stagehand-webhook.md`](docs/stagehand-webhook.md).
 - **`stagehand`** — anchor class; `include stagehand` manages nothing by
   itself, but its `manage_patching` parameter (default `false`) applies
