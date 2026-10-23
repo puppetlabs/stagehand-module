@@ -2,11 +2,12 @@
 
 require 'spec_helper'
 
-# Covers stagehand::webhook (Phase 57.6, D-11 / D-31): one class that turns a
-# Puppet Core primary with no code-deploy tool into one the Advanced Code
-# Manager pack can deploy to -- r10k and its config, the Stagehand fork of
-# webhook-go from a pinned, checksummed package, an mTLS config built on the
-# primary's own Puppet certificate, and a running service.
+# Covers stagehand::webhook (Phase 57.6 D-11 / D-31, Phase 57.6.2 D-01 / D-04 /
+# D-12 / D-20): one class that turns a Puppet Core primary with no code-deploy
+# tool into one the Advanced Code Manager pack can deploy to -- r10k and its
+# config, the Stagehand deploy agent from a pinned, checksummed package, run as
+# its own user (never root), an mTLS config built on the primary's own Puppet
+# certificate, both keys passed by systemd credentials, and a running service.
 describe 'stagehand::webhook' do
   let(:node) { 'primary.example.test' }
 
@@ -18,8 +19,12 @@ describe 'stagehand::webhook' do
     'https://git.example.test/puppet/control-repo.git'
   end
 
-  def webhook_yml
-    '/etc/voxpupuli/webhook.yml'
+  def agent_config
+    '/etc/stagehand-deploy-agent/config.yml'
+  end
+
+  def agent_user
+    'stagehand-deploy-agent'
   end
 
   def r10k_yaml
@@ -30,17 +35,25 @@ describe 'stagehand::webhook' do
     context "on #{os}" do
       let(:debian) { os_facts[:os]['family'] == 'Debian' }
       let(:pkg_basename) do
-        debian ? 'webhook-go_2.15.1-stagehand.1_amd64.deb' : 'webhook-go-2.15.1-stagehand.1.x86_64.rpm'
+        debian ? 'stagehand-deploy-agent_1.1.0_linux_amd64.deb' : 'stagehand-deploy-agent-1.1.0-1.x86_64.rpm'
       end
-      let(:pkg_url) { "https://releases.example.test/webhook-go/v2.15.1-stagehand.1/#{pkg_basename}" }
-      let(:pkg_path) { "/var/cache/stagehand-webhook/#{pkg_basename}" }
-      let(:facts) { os_facts.merge(puppetversion: '8.10.0') }
+      let(:pkg_url) { "https://releases.example.test/stagehand-deploy-agent/v1.1.0/#{pkg_basename}" }
+      let(:pkg_path) { "/var/cache/stagehand-deploy-agent/#{pkg_basename}" }
+      let(:facts) { os_facts.merge(puppetversion: '8.10.0', stagehand_systemd_version: 255) }
       let(:params) do
         {
           'control_remote' => control_remote,
-          'webhook_package_source' => pkg_url,
-          'webhook_package_sha256' => sha256,
+          'agent_package_source' => pkg_url,
+          'agent_package_sha256' => sha256,
         }
+      end
+
+      def dropin_dir
+        '/etc/systemd/system/stagehand-deploy-agent.service.d'
+      end
+
+      def dropin
+        "#{dropin_dir}/50-stagehand.conf"
       end
 
       def content_of(path)
@@ -58,13 +71,44 @@ describe 'stagehand::webhook' do
           is_expected.to contain_package('r10k').with(ensure: '5.0.3', provider: 'puppet_gem')
         end
 
-        it 'manages the r10k config and cache directories' do
-          is_expected.to contain_file('/etc/puppetlabs/r10k').with(ensure: 'directory', owner: 'root', mode: '0750')
-          is_expected.to contain_file('/opt/puppetlabs/puppet/cache/r10k').with(ensure: 'directory', owner: 'root', mode: '0750')
+        it 'creates the agent user as a system user in group puppet, with no login shell' do
+          is_expected.to contain_user(agent_user).with(
+            ensure: 'present',
+            system: true,
+            gid: 'puppet',
+            home: '/var/lib/stagehand-deploy-agent',
+            shell: '/usr/sbin/nologin',
+            managehome: false,
+          )
+        end
+
+        it 'hands the agent user the environments directory and the r10k cache, group puppet, 0750' do
+          is_expected.to contain_file('/etc/puppetlabs/code/environments').with(
+            ensure: 'directory', owner: agent_user, group: 'puppet', mode: '0750',
+          )
+          is_expected.to contain_file('/opt/puppetlabs/puppet/cache/r10k').with(
+            ensure: 'directory', owner: agent_user, group: 'puppet', mode: '0750',
+          )
+        end
+
+        it 'does not manage the code directory itself, the global hiera.yaml or modules' do
+          is_expected.not_to contain_file('/etc/puppetlabs/code')
+          is_expected.not_to contain_file('/etc/puppetlabs/code/hiera.yaml')
+          is_expected.not_to contain_file('/etc/puppetlabs/code/modules')
+        end
+
+        it 'changes nothing under the Puppet ssl directory' do
+          ssl = '/etc/puppetlabs/puppet/ssl'
+          paths = catalogue.resources.select { |r| r.type == 'File' }.map { |r| (r[:path] || r.title).to_s }
+          expect(paths.grep(%r{\A#{ssl}})).to be_empty
+        end
+
+        it 'lets the agent read the r10k config through the puppet group' do
+          is_expected.to contain_file('/etc/puppetlabs/r10k').with(ensure: 'directory', owner: 'root', group: 'puppet', mode: '0750')
+          is_expected.to contain_file(r10k_yaml).with(ensure: 'file', owner: 'root', group: 'puppet', mode: '0640')
         end
 
         it 'writes r10k.yaml with the remote, the basedir, an explicit cachedir and no prefix' do
-          is_expected.to contain_file(r10k_yaml).with(ensure: 'file', owner: 'root', mode: '0640')
           content = content_of(r10k_yaml)
           expect(content).to include("cachedir: '/opt/puppetlabs/puppet/cache/r10k'")
           expect(content).to include("remote: '#{control_remote}'")
@@ -72,8 +116,8 @@ describe 'stagehand::webhook' do
           expect(content).to include('prefix: false')
         end
 
-        it 'downloads the fork package into a managed cache directory, checked against the pinned sha256' do
-          is_expected.to contain_file('/var/cache/stagehand-webhook').with(ensure: 'directory', owner: 'root', mode: '0750')
+        it 'downloads the agent package into a managed cache directory, checked against the pinned sha256' do
+          is_expected.to contain_file('/var/cache/stagehand-deploy-agent').with(ensure: 'directory', owner: 'root', mode: '0750')
           is_expected.to contain_file(pkg_path).with(
             ensure: 'file',
             source: pkg_url,
@@ -82,120 +126,173 @@ describe 'stagehand::webhook' do
           )
         end
 
-        it 'installs the fork package from that file with the native provider' do
-          is_expected.to contain_package('webhook-go').with(
+        it 'installs the agent package from that file with the native provider' do
+          is_expected.to contain_package('stagehand-deploy-agent').with(
             ensure: 'latest',
             provider: debian ? 'dpkg' : 'rpm',
             source: pkg_path,
           )
         end
 
-        it 'writes webhook.yml (0640 root) with the node identity, the estate CA, the CRL and the allow-list' do
-          is_expected.to contain_file(webhook_yml).with(ensure: 'file', owner: 'root', group: 'root', mode: '0640')
-          content = content_of(webhook_yml)
-          expect(content).to include('enabled: true')
-          expect(content).to include("certificate: '/etc/puppetlabs/puppet/ssl/certs/primary.example.test.pem'")
-          expect(content).to include("key: '/etc/puppetlabs/puppet/ssl/private_keys/primary.example.test.pem'")
-          expect(content).to include("client_ca: '/etc/puppetlabs/puppet/ssl/certs/ca.pem'")
-          expect(content).to include("crl: '/etc/puppetlabs/puppet/ssl/crl.pem'")
-          expect(content).to match(%r{allowed_certnames:\n\s+- 'stagehand-code-manager'\n})
-          expect(content).to include('allowed_fingerprints: []')
-          expect(content).to include('port: 8088')
+        it 'does not manage the old webhook-go service, package or config' do
+          is_expected.not_to contain_service('webhook-go')
+          is_expected.not_to contain_package('webhook-go')
+          is_expected.not_to contain_file('/etc/voxpupuli/webhook.yml')
         end
 
-        it 'points the fork at the Puppet Core r10k, never the PE path' do
-          content = content_of(webhook_yml)
-          expect(content).to include("command_path: '/opt/puppetlabs/puppet/bin/r10k'")
-          expect(content).to include("config_path: '#{r10k_yaml}'")
-          expect(content).to include('use_g10k_commands: false')
-          expect(content).not_to include('puppetserver/bin/r10k')
+        it 'writes the agent config (0640 root:puppet) exactly as the reviewed fixture' do
+          is_expected.to contain_file(agent_config).with(ensure: 'file', owner: 'root', group: 'puppet', mode: '0640')
+          expect(content_of(agent_config)).to eq(File.read(File.join(__dir__, '..', 'expected', 'webhook', 'config.yml')))
         end
 
-        it 'renders the deploy settings' do
-          content = content_of(webhook_yml)
-          expect(content).to include("basedir: '/etc/puppetlabs/code/environments'")
-          expect(content).to include("timeout: '15m'")
-          expect(content).to include("state_dir: '/var/lib/webhook-go'")
-          expect(content).to include('output_limit: 262144')
-          expect(content).to include('max_jobs: 500')
+        it 'renders YAML the agent can read, with the nested keys of its strict schema' do
+          config = YAML.safe_load(content_of(agent_config))
+          expect(config.keys).to contain_exactly('server', 'ops', 'engine', 'deploys')
+          expect(config.dig('server', 'tls', 'key')).to eq('/run/credentials/stagehand-deploy-agent.service/server.key')
+          expect(config.dig('server', 'tls', 'certificate')).to eq('/etc/puppetlabs/puppet/ssl/certs/primary.example.test.pem')
+          expect(config.dig('server', 'tls', 'allowed_certnames')).to eq(['stagehand-code-manager'])
+          expect(config.dig('engine', 'command_path')).to eq('/opt/puppetlabs/puppet/bin/r10k')
+          expect(config.dig('deploys', 'state_dir')).to eq('/var/lib/stagehand-deploy-agent')
+          expect(config.dig('deploys', 'protected_environments')).to eq(['production'])
         end
 
-        it 'creates the state directory 0700, owned by the service user (root, per the unit)' do
-          is_expected.to contain_file('/var/lib/webhook-go').with(
-            ensure: 'directory', owner: 'root', group: 'root', mode: '0700',
+        it 'creates the state directory 0700, owned by the agent user' do
+          is_expected.to contain_file('/var/lib/stagehand-deploy-agent').with(
+            ensure: 'directory', owner: agent_user, group: 'puppet', mode: '0700',
           )
         end
 
-        it 'has the state directory in place before the service starts' do
-          is_expected.to contain_service('webhook-go').that_requires('File[/var/lib/webhook-go]')
-        end
-
         it 'keeps the service running and enabled' do
-          is_expected.to contain_service('webhook-go').with(ensure: 'running', enable: true)
+          is_expected.to contain_service('stagehand-deploy-agent').with(ensure: 'running', enable: true)
         end
 
-        it 'orders r10k package -> r10k config -> fork package -> webhook config -> service' do
+        it 'has the directories in place before the service starts' do
+          %w[/etc/puppetlabs/code/environments /opt/puppetlabs/puppet/cache/r10k /var/lib/stagehand-deploy-agent].each do |dir|
+            is_expected.to contain_service('stagehand-deploy-agent').that_requires("File[#{dir}]")
+          end
+        end
+
+        it 'orders r10k package -> r10k config -> agent package -> agent config -> service' do
           is_expected.to contain_file(r10k_yaml).that_requires('Package[r10k]')
-          is_expected.to contain_package('webhook-go').that_requires("File[#{r10k_yaml}]")
-          is_expected.to contain_package('webhook-go').that_requires("File[#{pkg_path}]")
-          is_expected.to contain_file(webhook_yml).that_requires('Package[webhook-go]')
+          is_expected.to contain_package('stagehand-deploy-agent').that_requires("File[#{r10k_yaml}]")
+          is_expected.to contain_package('stagehand-deploy-agent').that_requires("File[#{pkg_path}]")
+          is_expected.to contain_file(agent_config).that_requires('Package[stagehand-deploy-agent]')
         end
 
-        it 'restarts the service when the config or the package changes' do
-          is_expected.to contain_service('webhook-go').that_subscribes_to("File[#{webhook_yml}]")
-          is_expected.to contain_service('webhook-go').that_subscribes_to('Package[webhook-go]')
+        it 'restarts the service when the config, the drop-in or the package changes' do
+          is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to("File[#{agent_config}]")
+          is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to("File[#{dropin}]")
+          is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to('Package[stagehand-deploy-agent]')
         end
 
-        context 'systemd drop-in for webhook-go' do
-          def dropin_dir
-            '/etc/systemd/system/webhook-go.service.d'
-          end
+        it 'keeps the agent config directory root:puppet 0750' do
+          is_expected.to contain_file('/etc/stagehand-deploy-agent').with(ensure: 'directory', owner: 'root', group: 'puppet', mode: '0750')
+        end
 
-          def dropin
-            "#{dropin_dir}/50-stagehand.conf"
-          end
-
+        context 'systemd drop-in for stagehand-deploy-agent' do
           it 'manages the drop-in directory and file' do
             is_expected.to contain_file(dropin_dir).with(ensure: 'directory', owner: 'root', group: 'root', mode: '0755')
             is_expected.to contain_file(dropin).with(ensure: 'file', owner: 'root', group: 'root', mode: '0644')
                                                .that_requires("File[#{dropin_dir}]")
           end
 
-          it 'stops with SIGTERM to the main process first, then kills the rest after 60s' do
-            content = content_of(dropin)
-            expect(content).to match(%r{^\[Service\]$})
-            expect(content).to match(%r{^KillMode=mixed$})
-            expect(content).to match(%r{^TimeoutStopSec=60$})
+          it 'names the service user' do
+            expect(content_of(dropin)).to match(%r{^\[Service\]$})
+            expect(content_of(dropin)).to match(%r{^User=stagehand-deploy-agent$})
           end
 
-          it "clears upstream's ExecReload so a reload never sends SIGHUP" do
+          it "passes this node's Puppet private key as a systemd credential and nothing else" do
             content = content_of(dropin)
-            expect(content).to match(%r{^ExecReload=$})
-            expect(content).not_to match(%r{^ExecReload=\S})
-            expect(content).not_to match(%r{^[^#]*HUP})
+            expect(content).to match(%r{^LoadCredential=server\.key:/etc/puppetlabs/puppet/ssl/private_keys/primary\.example\.test\.pem$})
+            expect(content.scan(%r{^LoadCredential=}).length).to eq(1)
           end
 
-          it 'explains why in a comment' do
+          it 'clears the packaged ReadWritePaths and sets the environments directory and the r10k cache' do
             content = content_of(dropin)
-            expect(content).to match(%r{^#.*SIGHUP}i)
-            expect(content).to match(%r{^#.*\$PID})
-            expect(content).to match(%r{^#.*process group}i)
+            expect(content).to match(%r{^ReadWritePaths=$})
+            expect(content).to match(%r{^ReadWritePaths=/etc/puppetlabs/code/environments /opt/puppetlabs/puppet/cache/r10k$})
+          end
+
+          it 'explains each setting in a comment' do
+            content = content_of(dropin)
+            expect(content).to match(%r{^#.*never root}i)
+            expect(content).to match(%r{^#.*systemd 247}i)
+            expect(content).to match(%r{^#.*read-only}i)
           end
 
           it 'reloads systemd when the drop-in changes, before the service is managed' do
-            is_expected.to contain_exec('stagehand-webhook-systemd-reload').with(
+            is_expected.to contain_exec('stagehand-deploy-agent-systemd-reload').with(
               command: '/bin/systemctl daemon-reload', refreshonly: true,
             ).that_subscribes_to("File[#{dropin}]")
-            is_expected.to contain_service('webhook-go').that_requires('Exec[stagehand-webhook-systemd-reload]')
+            is_expected.to contain_service('stagehand-deploy-agent').that_requires('Exec[stagehand-deploy-agent-systemd-reload]')
           end
         end
 
-        it 'manages no ssh configuration for an https remote' do
-          is_expected.not_to contain_file('/root/.ssh')
-          is_expected.not_to contain_file('/root/.ssh/config.d/stagehand-webhook.conf')
-          is_expected.not_to contain_file('/root/.ssh/known_hosts_stagehand')
-          is_expected.not_to contain_file_line('stagehand-webhook ssh include')
+        context 'the run_as guard (D-04)' do
+          it 'fails the run at apply time if run_as resolves to uid 0, before anything the agent needs' do
+            guard = 'stagehand-deploy-agent-run-as-not-uid0'
+            is_expected.to contain_exec(guard)
+            is_expected.to contain_exec(guard).that_comes_before("User[#{agent_user}]")
+            is_expected.to contain_exec(guard).that_comes_before('File[/etc/puppetlabs/code/environments]')
+            is_expected.to contain_exec(guard).that_comes_before('File[/opt/puppetlabs/puppet/cache/r10k]')
+            is_expected.to contain_exec(guard).that_comes_before('Package[stagehand-deploy-agent]')
+            is_expected.to contain_exec(guard).that_comes_before('Service[stagehand-deploy-agent]')
+          end
+
+          it 'passes the user name as an argument, never splicing it into the script' do
+            exec = catalogue.resource('Exec', 'stagehand-deploy-agent-run-as-not-uid0')
+            expect(exec[:command]).to eq(['/bin/sh', '-c', 'echo "stagehand::webhook: run_as $1 resolves to uid 0; refusing" >&2; exit 1', 'sh', agent_user])
+            expect(exec[:unless].flatten).to include('sh', agent_user)
+            expect(exec[:unless].flatten.join(' ')).not_to include("id -u #{agent_user}")
+          end
         end
+      end
+
+      context 'with run_as root' do
+        let(:params) { super().merge('run_as' => 'root') }
+
+        it { is_expected.to compile.and_raise_error(%r{run_as must not be root}) }
+      end
+
+      context 'with run_as 0' do
+        let(:params) { super().merge('run_as' => '0') }
+
+        it { is_expected.to compile.and_raise_error(%r{run_as}) }
+      end
+
+      context 'with a run_as that is not a user name' do
+        let(:params) { super().merge('run_as' => 'agent user; id') }
+
+        it { is_expected.to compile.and_raise_error(%r{run_as}) }
+      end
+
+      context 'with another run_as' do
+        let(:params) { super().merge('run_as' => 'deployer') }
+
+        it 'owns the directories and names the user in the drop-in' do
+          is_expected.to contain_user('deployer')
+          is_expected.to contain_file('/etc/puppetlabs/code/environments').with_owner('deployer')
+          expect(content_of(dropin)).to match(%r{^User=deployer$})
+          is_expected.to contain_exec('stagehand-deploy-agent-run-as-not-uid0').that_comes_before('User[deployer]')
+        end
+      end
+
+      context 'with systemd 245 (Ubuntu 20.04)' do
+        let(:facts) { super().merge(stagehand_systemd_version: 245) }
+
+        it { is_expected.to compile.and_raise_error(%r{systemd 247.*found 245}) }
+      end
+
+      context 'with systemd 247' do
+        let(:facts) { super().merge(stagehand_systemd_version: 247) }
+
+        it { is_expected.to compile.with_all_deps }
+      end
+
+      context 'without the systemd version fact' do
+        let(:facts) { os_facts.merge(puppetversion: '8.10.0') }
+
+        it { is_expected.to compile.and_raise_error(%r{systemd 247.*found none}) }
       end
 
       context 'on the CA host' do
@@ -204,7 +301,7 @@ describe 'stagehand::webhook' do
         it { is_expected.to compile.with_all_deps }
 
         it "reads the CA's own CRL, which `puppetserver ca revoke` updates at once" do
-          content = content_of(webhook_yml)
+          content = content_of(agent_config)
           expect(content).to include("crl: '/etc/puppetlabs/puppetserver/ca/ca_crl.pem'")
           expect(content).not_to include("crl: '/etc/puppetlabs/puppet/ssl/crl.pem'")
         end
@@ -214,7 +311,7 @@ describe 'stagehand::webhook' do
         let(:facts) { super().merge(stagehand_puppetserver_ca: false) }
 
         it "falls back to the agent's CRL copy" do
-          expect(content_of(webhook_yml)).to include("crl: '/etc/puppetlabs/puppet/ssl/crl.pem'")
+          expect(content_of(agent_config)).to include("crl: '/etc/puppetlabs/puppet/ssl/crl.pem'")
         end
       end
 
@@ -223,7 +320,7 @@ describe 'stagehand::webhook' do
         let(:params) { super().merge('crl_path' => '/etc/pki/stagehand/ca_crl.pem') }
 
         it 'renders that path, even on the CA host' do
-          expect(content_of(webhook_yml)).to include("crl: '/etc/pki/stagehand/ca_crl.pem'")
+          expect(content_of(agent_config)).to include("crl: '/etc/pki/stagehand/ca_crl.pem'")
         end
       end
 
@@ -239,17 +336,55 @@ describe 'stagehand::webhook' do
         it { is_expected.to compile.and_raise_error(%r{control character}) }
       end
 
-      context 'with a custom state_dir and max_jobs' do
-        let(:params) { super().merge('state_dir' => '/srv/webhook-go/state', 'max_jobs' => 50) }
-
-        it 'creates that directory and renders both keys' do
-          is_expected.to contain_file('/srv/webhook-go/state').with(ensure: 'directory', owner: 'root', mode: '0700')
-          is_expected.to contain_service('webhook-go').that_requires('File[/srv/webhook-go/state]')
-          content = content_of(webhook_yml)
-          expect(content).to include("state_dir: '/srv/webhook-go/state'")
-          expect(content).to include('max_jobs: 50')
-          expect(content).not_to include('/var/lib/webhook-go')
+      context 'with a custom state_dir, max_jobs and protected_environments' do
+        let(:params) do
+          super().merge('state_dir' => '/srv/stagehand/state', 'max_jobs' => 50, 'protected_environments' => %w[production staging])
         end
+
+        it 'creates that directory, renders the keys and lets the unit write there' do
+          is_expected.to contain_file('/srv/stagehand/state').with(ensure: 'directory', owner: agent_user, mode: '0700')
+          is_expected.to contain_service('stagehand-deploy-agent').that_requires('File[/srv/stagehand/state]')
+          config = YAML.safe_load(content_of(agent_config))
+          expect(config.dig('deploys', 'state_dir')).to eq('/srv/stagehand/state')
+          expect(config.dig('deploys', 'max_jobs')).to eq(50)
+          expect(config.dig('deploys', 'protected_environments')).to eq(%w[production staging])
+          expect(content_of(agent_config)).not_to include('/var/lib/stagehand-deploy-agent')
+          expect(content_of(dropin)).to match(%r{^ReadWritePaths=/etc/puppetlabs/code/environments /opt/puppetlabs/puppet/cache/r10k /srv/stagehand/state$})
+        end
+      end
+
+      context 'with no protected environments' do
+        let(:params) { super().merge('protected_environments' => []) }
+
+        it 'renders an empty list the agent accepts' do
+          expect(YAML.safe_load(content_of(agent_config)).dig('deploys', 'protected_environments')).to eq([])
+        end
+      end
+
+      context 'with a protected environment that is not a valid name' do
+        let(:params) { super().merge('protected_environments' => ['Prod uction']) }
+
+        it { is_expected.to compile.and_raise_error(%r{protected_environments}) }
+      end
+
+      context 'with a state_dir containing whitespace' do
+        let(:params) { super().merge('state_dir' => '/srv/stagehand state') }
+
+        it { is_expected.to compile.and_raise_error(%r{whitespace}) }
+      end
+
+      context 'with an ops_listen on another interface' do
+        let(:params) { super().merge('ops_listen' => '[::1]:9100') }
+
+        it 'renders it' do
+          expect(YAML.safe_load(content_of(agent_config)).dig('ops', 'listen')).to eq('[::1]:9100')
+        end
+      end
+
+      context 'with an ops_listen that is not host:port' do
+        let(:params) { super().merge('ops_listen' => 'localhost') }
+
+        it { is_expected.to compile.and_raise_error(%r{ops_listen}) }
       end
 
       context 'with max_jobs below 1' do
@@ -271,7 +406,7 @@ describe 'stagehand::webhook' do
       end
 
       context 'with a Puppet 7 agent' do
-        let(:facts) { os_facts.merge(puppetversion: '7.30.0') }
+        let(:facts) { os_facts.merge(puppetversion: '7.30.0', stagehand_systemd_version: 255) }
 
         it { is_expected.to compile.with_all_deps }
         it { is_expected.to contain_package('r10k').with(ensure: '4.1.0', provider: 'puppet_gem') }
@@ -298,60 +433,6 @@ describe 'stagehand::webhook' do
         end
       end
 
-      context 'with an SSH control remote' do
-        def known_host
-          'github.com ssh-ed25519 AAAAexamplehostkey'
-        end
-        let(:params) do
-          super().merge(
-            'control_remote' => 'git@github.com:example/control-repo.git',
-            'git_ssh_host' => 'github.com',
-            'git_ssh_key' => '/root/.ssh/stagehand_deploy',
-            'git_ssh_known_host' => known_host,
-          )
-        end
-
-        it { is_expected.to compile.with_all_deps }
-
-        it 'ensures root ssh directories exist with mode 0700' do
-          is_expected.to contain_file('/root/.ssh').with(ensure: 'directory', owner: 'root', mode: '0700')
-          is_expected.to contain_file('/root/.ssh/config.d').with(ensure: 'directory', owner: 'root', mode: '0700')
-        end
-
-        it 'writes a Host block fragment that uses the deploy key and strict host key checking' do
-          is_expected.to contain_file('/root/.ssh/config.d/stagehand-webhook.conf').with(ensure: 'file', owner: 'root', mode: '0600')
-          content = content_of('/root/.ssh/config.d/stagehand-webhook.conf')
-          expect(content).to match(%r{^Host github\.com$})
-          expect(content).to include('IdentityFile "/root/.ssh/stagehand_deploy"')
-          expect(content).to include('IdentitiesOnly yes')
-          expect(content).to include('UserKnownHostsFile "/root/.ssh/known_hosts_stagehand"')
-          expect(content).to include('StrictHostKeyChecking yes')
-        end
-
-        it 'writes the operator-supplied host key line into a dedicated known_hosts file' do
-          is_expected.to contain_file('/root/.ssh/known_hosts_stagehand').with(
-            ensure: 'file', owner: 'root', mode: '0644', content: "#{known_host}\n",
-          )
-        end
-
-        it "includes the fragment from root's ssh config without owning the rest of that file" do
-          is_expected.to contain_file('/root/.ssh/config').with(ensure: 'file', owner: 'root', mode: '0600')
-          is_expected.to contain_file('/root/.ssh/config').without_content
-          is_expected.to contain_file_line('stagehand-webhook ssh match all').with(
-            path: '/root/.ssh/config', line: 'Match all',
-          )
-          is_expected.to contain_file_line('stagehand-webhook ssh include').with(
-            path: '/root/.ssh/config', line: 'Include config.d/*.conf', after: '^Match all$',
-          ).that_requires('File_line[stagehand-webhook ssh match all]')
-        end
-
-        it 'has the ssh setup in place before the service starts' do
-          is_expected.to contain_service('webhook-go').that_requires('File[/root/.ssh/config.d/stagehand-webhook.conf]')
-          is_expected.to contain_service('webhook-go').that_requires('File[/root/.ssh/known_hosts_stagehand]')
-          is_expected.to contain_service('webhook-go').that_requires('File_line[stagehand-webhook ssh include]')
-        end
-      end
-
       context 'with git_ssh_host but no git_ssh_key' do
         let(:params) { super().merge('git_ssh_host' => 'github.com', 'git_ssh_known_host' => 'github.com ssh-ed25519 AAAAx') }
 
@@ -359,7 +440,7 @@ describe 'stagehand::webhook' do
       end
 
       context 'with git_ssh_host but no git_ssh_known_host' do
-        let(:params) { super().merge('git_ssh_host' => 'github.com', 'git_ssh_key' => '/root/.ssh/stagehand_deploy') }
+        let(:params) { super().merge('git_ssh_host' => 'github.com', 'git_ssh_key' => '/etc/stagehand-deploy-agent/deploy_key') }
 
         it { is_expected.to compile.and_raise_error(%r{git_ssh_known_host}) }
       end
@@ -368,7 +449,7 @@ describe 'stagehand::webhook' do
         let(:params) do
           super().merge(
             'git_ssh_host' => 'github.com',
-            'git_ssh_key' => '/root/.ssh/stagehand_deploy',
+            'git_ssh_key' => '/etc/stagehand-deploy-agent/deploy_key',
             'git_ssh_known_host' => "github.com ssh-ed25519 AAAAx\nevil.example ssh-ed25519 AAAAy",
           )
         end
@@ -380,7 +461,7 @@ describe 'stagehand::webhook' do
         let(:params) do
           super().merge(
             'git_ssh_host' => 'github.com',
-            'git_ssh_key' => '/root/.ssh/stagehand deploy',
+            'git_ssh_key' => '/etc/stagehand-deploy-agent/deploy key',
             'git_ssh_known_host' => 'github.com ssh-ed25519 AAAAx',
           )
         end
@@ -389,9 +470,9 @@ describe 'stagehand::webhook' do
       end
 
       context 'with a sha256 that is not 64 hex characters' do
-        let(:params) { super().merge('webhook_package_sha256' => 'abc') }
+        let(:params) { super().merge('agent_package_sha256' => 'abc') }
 
-        it { is_expected.to compile.and_raise_error(%r{webhook_package_sha256}) }
+        it { is_expected.to compile.and_raise_error(%r{agent_package_sha256}) }
       end
 
       context 'with engine g10k but no g10k_command_path' do
@@ -405,10 +486,10 @@ describe 'stagehand::webhook' do
 
         it { is_expected.to compile.with_all_deps }
 
-        it 'points the fork at g10k and switches on the g10k commands' do
-          content = content_of(webhook_yml)
-          expect(content).to include("command_path: '/usr/local/bin/g10k'")
-          expect(content).to include('use_g10k_commands: true')
+        it 'points the agent at g10k' do
+          config = YAML.safe_load(content_of(agent_config))
+          expect(config.dig('engine', 'name')).to eq('g10k')
+          expect(config.dig('engine', 'command_path')).to eq('/usr/local/bin/g10k')
         end
       end
 
@@ -424,8 +505,8 @@ describe 'stagehand::webhook' do
         end
         let(:params) { super().merge('allowed_fingerprints' => [fingerprint]) }
 
-        it 'renders them into webhook.yml' do
-          expect(content_of(webhook_yml)).to match(%r{allowed_fingerprints:\n\s+- '#{fingerprint}'\n})
+        it 'renders them into config.yml' do
+          expect(content_of(agent_config)).to match(%r{allowed_fingerprints:\n\s+- '#{fingerprint}'\n})
         end
       end
 
@@ -440,7 +521,7 @@ describe 'stagehand::webhook' do
         it { is_expected.to compile.with_all_deps }
 
         it 'renders it unchanged' do
-          expect(content_of(webhook_yml)).to include("- '#{fingerprint}'")
+          expect(content_of(agent_config)).to include("- '#{fingerprint}'")
         end
       end
 
@@ -449,8 +530,8 @@ describe 'stagehand::webhook' do
           super().merge('allowed_fingerprints' => [(['ab'] * 32).join(':'), (['cD'] * 32).join(':')])
         end
 
-        it 'is accepted, as the fork accepts it, and rendered in upper case' do
-          content = content_of(webhook_yml)
+        it 'is accepted, as the agent accepts it, and rendered in upper case' do
+          content = content_of(agent_config)
           expect(content).to include("- '#{(['AB'] * 32).join(':')}'")
           expect(content).to include("- '#{(['CD'] * 32).join(':')}'")
           expect(content).not_to include((['ab'] * 32).join(':'))
@@ -464,7 +545,7 @@ describe 'stagehand::webhook' do
         end
 
         it 'renders it once' do
-          expect(content_of(webhook_yml).scan((['AB'] * 32).join(':')).length).to eq(1)
+          expect(content_of(agent_config).scan((['AB'] * 32).join(':')).length).to eq(1)
         end
       end
 
@@ -485,10 +566,10 @@ describe 'stagehand::webhook' do
 
       context 'with a package source whose extension does not match the OS family' do
         let(:params) do
-          super().merge('webhook_package_source' => "https://releases.example.test/webhook-go.#{debian ? 'rpm' : 'deb'}")
+          super().merge('agent_package_source' => "https://releases.example.test/webhook-go.#{debian ? 'rpm' : 'deb'}")
         end
 
-        it { is_expected.to compile.and_raise_error(%r{webhook_package_source}) }
+        it { is_expected.to compile.and_raise_error(%r{agent_package_source}) }
       end
     end
   end

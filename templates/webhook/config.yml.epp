@@ -1,0 +1,72 @@
+<%- |
+  Integer             $port,
+  String[1]           $certificate,
+  String[1]           $key,
+  String[1]           $client_ca,
+  String[1]           $crl,
+  Array[String[1], 1] $allowed_certnames,
+  Array[String[1]]    $allowed_fingerprints,
+  String[1]           $ops_listen,
+  String[1]           $engine,
+  String[1]           $command_path,
+  String[1]           $config_path,
+  String[1]           $basedir,
+  String[1]           $state_dir,
+  String[1]           $deploy_timeout,
+  Integer[1]          $max_jobs,
+  Array[String[1]]    $protected_environments,
+| -%>
+# Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
+# Configuration of the Stagehand deploy agent (mTLS deploy API for the Advanced Code Manager pack).
+# The agent refuses a key it does not know, so check a change by hand with:
+#   stagehand-deploy-agent --check-config --config /etc/stagehand-deploy-agent/config.yml
+---
+server:
+  port: <%= $port %>
+  tls:
+    # This primary's own Puppet certificate is the server identity.
+    certificate: '<%= $certificate.regsubst("'", "''", 'G') %>'
+    # The private key arrives as a systemd credential (LoadCredential= in the
+    # unit's drop-in), so the agent never reads Puppet's private key directory.
+    key: '<%= $key.regsubst("'", "''", 'G') %>'
+    # Only clients holding a certificate signed by this estate's CA may connect...
+    client_ca: '<%= $client_ca.regsubst("'", "''", 'G') %>'
+    # ...that has not been revoked (puppetserver ca revoke)...
+    crl: '<%= $crl.regsubst("'", "''", 'G') %>'
+    # ...and whose certname is on this list.
+    allowed_certnames:
+<%- $allowed_certnames.each |$certname| { -%>
+      - '<%= $certname.regsubst("'", "''", 'G') %>'
+<%- } -%>
+    # Optional extra pin: SHA-256 fingerprints of the exact client certificates allowed.
+<%- if $allowed_fingerprints.empty { -%>
+    allowed_fingerprints: []
+<%- } else { -%>
+    allowed_fingerprints:
+<%-   $allowed_fingerprints.each |$fingerprint| { -%>
+      - '<%= $fingerprint %>'
+<%-   } -%>
+<%- } -%>
+ops:
+  # Health, readiness and metrics over plain HTTP. No authentication, so keep it on loopback.
+  listen: '<%= $ops_listen %>'
+engine:
+  name: '<%= $engine %>'
+  command_path: '<%= $command_path.regsubst("'", "''", 'G') %>'
+  config_path: '<%= $config_path.regsubst("'", "''", 'G') %>'
+deploys:
+  basedir: '<%= $basedir.regsubst("'", "''", 'G') %>'
+  # Job records and the cross-process deploy lock live here (0700, the agent's user).
+  state_dir: '<%= $state_dir.regsubst("'", "''", 'G') %>'
+  timeout: '<%= $deploy_timeout %>'
+  # Job records kept; the oldest finished ones beyond this are deleted.
+  max_jobs: <%= $max_jobs %>
+  # Environments that can never be removed through the API.
+<%- if $protected_environments.empty { -%>
+  protected_environments: []
+<%- } else { -%>
+  protected_environments:
+<%-   $protected_environments.each |$environment| { -%>
+    - '<%= $environment %>'
+<%-   } -%>
+<%- } -%>

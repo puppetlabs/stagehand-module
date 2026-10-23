@@ -1,22 +1,21 @@
-<%- | | -%>
+<%- |
+  String[1]        $run_as,
+  String[1]        $server_key,
+  Array[String[1], 1] $read_write_paths,
+| -%>
 # Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
-# Overrides for the webhook-go fork's systemd unit. Guide: docs/stagehand-webhook.md
+# Node-specific overrides for the Stagehand deploy agent's packaged systemd unit.
+# Guide: docs/stagehand-webhook.md
 [Service]
-# Stopping: the fork handles SIGTERM itself. It cancels the running deploy,
-# kills the engine's whole process group (r10k or g10k and their git
-# children), marks queued jobs failed and writes the job records, waiting up
-# to 30s. Upstream's unit has KillMode=process, so anything left in the unit
-# after the main process exits is never signalled and is orphaned.
-# KillMode=mixed sends SIGTERM to the main process only, so the fork can do
-# the above, then SIGKILL to everything still in the unit's cgroup once
-# TimeoutStopSec expires. 60s leaves room for the fork's own 30s wait.
-KillMode=mixed
-TimeoutStopSec=60
-# Reloading: upstream's ExecReload sends SIGHUP to $PID, which systemd never
-# defines, so a reload does nothing. A SIGHUP that did arrive would be worse:
-# Go's default action ends the process at once, skipping the graceful stop
-# above, and the next start fails the running job as interrupted. The empty
-# line below clears ExecReload, so `systemctl reload webhook-go` is refused
-# and a reload never sends SIGHUP. Config changes need a restart; Puppet
-# restarts the service whenever webhook.yml changes.
-ExecReload=
+# The user the agent runs as. It is never root; the agent refuses to start as root.
+User=<%= $run_as %>
+# This node's Puppet private key, copied by systemd into a directory only the service
+# user can read (/run/credentials/stagehand-deploy-agent.service/server.key). Puppet's own
+# ssl directory is not touched. Needs systemd 247 or later. The key is read once at
+# service start, so a renewed certificate needs a service restart.
+LoadCredential=server.key:<%= $server_key.regsubst('%', '%%', 'G') %>
+# The unit makes the file system read-only except for the paths listed. The empty line
+# clears the packaged defaults, the next line sets the real ones. Each directory must
+# exist before the service starts (the class creates them).
+ReadWritePaths=
+ReadWritePaths=<%= $read_write_paths.map |$path| { $path.regsubst('%', '%%', 'G') }.join(' ') %>
