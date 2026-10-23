@@ -56,6 +56,20 @@ describe 'stagehand::webhook' do
         "#{dropin_dir}/50-stagehand.conf"
       end
 
+      def ssh_config_path
+        '/etc/stagehand-deploy-agent/ssh_config'
+      end
+
+      def known_hosts_path
+        '/etc/stagehand-deploy-agent/known_hosts'
+      end
+
+      def resources_under_root
+        catalogue.resources.select do |r|
+          [r.title, r[:path]].compact.any? { |value| value.to_s.start_with?('/root') }
+        end
+      end
+
       def content_of(path)
         catalogue.resource('File', path)[:content]
       end
@@ -183,6 +197,18 @@ describe 'stagehand::webhook' do
           is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to("File[#{agent_config}]")
           is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to("File[#{dropin}]")
           is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to('Package[stagehand-deploy-agent]')
+        end
+
+        it 'manages no ssh files, no deploy key credential and no engine.ssh_config for an https remote' do
+          is_expected.not_to contain_file(ssh_config_path)
+          is_expected.not_to contain_file(known_hosts_path)
+          expect(content_of(dropin)).not_to include('deploy_key')
+          expect(YAML.safe_load(content_of(agent_config)).fetch('engine')).not_to have_key('ssh_config')
+        end
+
+        it 'declares nothing under /root and no File_line (root ssh setup is never touched)' do
+          expect(resources_under_root).to be_empty
+          expect(catalogue.resources.select { |r| r.type == 'File_line' }).to be_empty
         end
 
         it 'keeps the agent config directory root:puppet 0750' do
@@ -430,6 +456,74 @@ describe 'stagehand::webhook' do
 
         it 'is refused by the type before it can reach YAML' do
           is_expected.to compile.and_raise_error(%r{control_remote})
+        end
+      end
+
+      context 'with an SSH control remote' do
+        def known_host
+          'github.com ssh-ed25519 AAAAexamplehostkey'
+        end
+        let(:params) do
+          super().merge(
+            'control_remote' => 'git@github.com:example/control-repo.git',
+            'git_ssh_host' => 'github.com',
+            'git_ssh_key' => '/etc/stagehand-deploy-agent/deploy_key',
+            'git_ssh_known_host' => known_host,
+          )
+        end
+
+        it { is_expected.to compile.with_all_deps }
+
+        it 'writes the agent ssh_config (owner the agent user, 0600) exactly as the reviewed fixture' do
+          is_expected.to contain_file(ssh_config_path).with(ensure: 'file', owner: agent_user, group: 'puppet', mode: '0600')
+          expect(content_of(ssh_config_path)).to eq(File.read(File.join(__dir__, '..', 'expected', 'webhook', 'ssh_config')))
+        end
+
+        it 'pins every host, refuses unknown ones and ignores every other ssh configuration' do
+          content = content_of(ssh_config_path)
+          expect(content).to match(%r{^Host \*$})
+          expect(content).to include('StrictHostKeyChecking yes')
+          expect(content).to include('UserKnownHostsFile "/etc/stagehand-deploy-agent/known_hosts"')
+          expect(content).to include('GlobalKnownHostsFile /dev/null')
+          expect(content).to include('IdentitiesOnly yes')
+          expect(content).to include('IdentityAgent none')
+          expect(content).to include('BatchMode yes')
+          expect(content).to include('IdentityFile "/run/credentials/stagehand-deploy-agent.service/deploy_key"')
+        end
+
+        it 'writes the operator-supplied host key line into the pinned known_hosts file' do
+          is_expected.to contain_file(known_hosts_path).with(
+            ensure: 'file', owner: agent_user, group: 'puppet', mode: '0644', content: "#{known_host}\n",
+          )
+        end
+
+        it 'passes the deploy key as a second systemd credential, after the Puppet key' do
+          lines = content_of(dropin).lines.grep(%r{^LoadCredential=}).map(&:chomp)
+          expect(lines).to eq([
+                                'LoadCredential=server.key:/etc/puppetlabs/puppet/ssl/private_keys/primary.example.test.pem',
+                                'LoadCredential=deploy_key:/etc/stagehand-deploy-agent/deploy_key',
+                              ])
+        end
+
+        it 'tells the agent which ssh_config to use' do
+          expect(YAML.safe_load(content_of(agent_config)).dig('engine', 'ssh_config')).to eq(ssh_config_path)
+        end
+
+        it 'has both ssh files in place before the service starts, and restarts it when they change' do
+          [ssh_config_path, known_hosts_path].each do |path|
+            is_expected.to contain_service('stagehand-deploy-agent').that_requires("File[#{path}]")
+            is_expected.to contain_service('stagehand-deploy-agent').that_subscribes_to("File[#{path}]")
+          end
+        end
+
+        it 'declares nothing under /root and no File_line' do
+          expect(resources_under_root).to be_empty
+          expect(catalogue.resources.select { |r| r.type == 'File_line' }).to be_empty
+        end
+
+        it 'does not change anything under the Puppet ssl directory' do
+          paths = catalogue.resources.select { |r| r.type == 'File' }.map { |r| (r[:path] || r.title).to_s }
+          expect(paths.grep(%r{\A/etc/puppetlabs/puppet/ssl})).to be_empty
         end
       end
 
