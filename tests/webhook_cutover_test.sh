@@ -32,6 +32,9 @@
 #      unreadable: exit 1, no chown; chown only ever gets ./name from inside the
 #      entry's own directory (find -execdir), never a multi-component path
 #  10  usage: unknown subcommand and missing arguments exit 2
+#  11  lock safety: a symlinked, non-regular or foreign-owned agent lock is
+#      refused with no chown; a missing one is created as the agent user;
+#      the fork's lock directory must not be writable by others (T-57.6.2-53)
 #
 # The last line is `PASS: webhook cutover` on success.
 
@@ -101,12 +104,38 @@ done
 printf '%s\n' "${line# }" >> "$CHOWN_LOG"
 SHIM
 
-chmod 0755 "$SHIMDIR/systemctl" "$SHIMDIR/stagehand-deploy-agent" "$SHIMDIR/chown"
+# id stub: `id -u agentuser` answers the uid of whoever runs this test (the
+# stand-in agent user, so a lock file this test creates is "owned by the agent
+# user"); SHIM_AGENT_UID overrides it. Every other call goes to the real id.
+cat > "$SHIMDIR/id" <<'SHIM'
+#!/bin/sh
+if [ "$1" = "-u" ] && [ "$2" = "agentuser" ]; then
+  printf '%s\n' "${SHIM_AGENT_UID:-$(/usr/bin/id -u)}"
+  exit 0
+fi
+exec /usr/bin/id "$@"
+SHIM
+
+# runuser stub: logs its arguments and runs the command after `--` as the
+# current user (the stand-in agent user).
+RUNUSER_LOG="$WORK/runuser.log"
+export RUNUSER_LOG
+cat > "$SHIMDIR/runuser" <<'SHIM'
+#!/bin/sh
+printf '%s\n' "$*" >> "$RUNUSER_LOG"
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+exec "$@"
+SHIM
+
+chmod 0755 "$SHIMDIR/systemctl" "$SHIMDIR/stagehand-deploy-agent" "$SHIMDIR/chown" "$SHIMDIR/id" "$SHIMDIR/runuser"
 
 STAGEHAND_CUTOVER_SYSTEMCTL="$SHIMDIR/systemctl"
 STAGEHAND_CUTOVER_AGENT="$SHIMDIR/stagehand-deploy-agent"
 STAGEHAND_CUTOVER_CHOWN="$SHIMDIR/chown"
-export STAGEHAND_CUTOVER_SYSTEMCTL STAGEHAND_CUTOVER_AGENT STAGEHAND_CUTOVER_CHOWN
+STAGEHAND_CUTOVER_ID="$SHIMDIR/id"
+STAGEHAND_CUTOVER_RUNUSER="$SHIMDIR/runuser"
+export STAGEHAND_CUTOVER_SYSTEMCTL STAGEHAND_CUTOVER_AGENT STAGEHAND_CUTOVER_CHOWN STAGEHAND_CUTOVER_ID STAGEHAND_CUTOVER_RUNUSER
 
 reset_logs() { : > "$SYSTEMCTL_LOG"; : > "$AGENT_LOG"; : > "$CHOWN_LOG"; rm -f "$CHOWN_LOG.multi"; }
 
@@ -327,6 +356,63 @@ run_cutover "$WORK/stderr" own "$AGENT_LOCK" agentuser puppet "$WORK/d1" "$WORK/
 expect_rc "own, protected_hardlinks unreadable" 1
 [ -s "$CHOWN_LOG" ] && fail "chown ran with protected_hardlinks unreadable: $(cat "$CHOWN_LOG")"
 printf '1\n' > "$HARDLINKS_ON"
+
+# --- 11. lock safety (T-57.6.2-53) -------------------------------------------
+# The agent's state directory is writable by the agent user, so root must
+# never create or follow the lock path there: flock(1) opens its path with
+# O_CREAT and follows symlinks, so a planted link would have root create (for
+# example) /etc/nologin. The fork's lock directory must be root's alone.
+info "11. lock safety"
+SAFE="$WORK/safe"
+mkdir -p "$SAFE/state" "$SAFE/tree" || fail "mkdir safe"
+
+# A symlinked agent lock is refused, its target is never created, no chown.
+reset_logs
+ln -s "$SAFE/created-by-root" "$SAFE/state/deploy.lock" || fail "symlink fixture"
+run_cutover "$WORK/stderr" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree"
+expect_rc "own, symlinked lock" 1
+[ -e "$SAFE/created-by-root" ] && fail "own followed a symlinked lock and created its target"
+[ -s "$CHOWN_LOG" ] && fail "chown ran with a symlinked lock: $(cat "$CHOWN_LOG")"
+grep -q 'symlink' "$WORK/stderr" || fail "the refusal does not say the lock is a symlink: $(cat "$WORK/stderr")"
+rm -f "$SAFE/state/deploy.lock"
+
+# A lock that is not a regular file is refused.
+reset_logs
+mkdir "$SAFE/state/deploy.lock"
+run_cutover "$WORK/stderr" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree"
+expect_rc "own, lock is a directory" 1
+[ -s "$CHOWN_LOG" ] && fail "chown ran with a non-regular lock: $(cat "$CHOWN_LOG")"
+rmdir "$SAFE/state/deploy.lock"
+
+# A lock owned by someone other than the agent user is refused.
+reset_logs
+: > "$SAFE/state/deploy.lock"
+SHIM_AGENT_UID=4242424 run_cutover "$WORK/stderr" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree"
+expect_rc "own, lock owned by another user" 1
+[ -s "$CHOWN_LOG" ] && fail "chown ran with a lock owned by another user: $(cat "$CHOWN_LOG")"
+rm -f "$SAFE/state/deploy.lock"
+
+# A missing agent lock is created as the agent user (runuser), never by root,
+# and the hand-over then runs.
+reset_logs; : > "$RUNUSER_LOG"
+run_cutover "$WORK/stderr" own "$SAFE/state/deploy.lock" agentuser puppet "$SAFE/tree"
+expect_rc "own, lock missing" 0
+grep -q -- '-u agentuser' "$RUNUSER_LOG" || fail "the missing lock was not created as the agent user: $(cat "$RUNUSER_LOG")"
+[ -f "$SAFE/state/deploy.lock" ] || fail "the missing lock was not created"
+[ -s "$CHOWN_LOG" ] || fail "own did not hand over after creating the lock"
+
+# The fork's lock directory must not be writable by anyone but its owner.
+reset_logs
+SHIM_LEGACY=present
+export SHIM_LEGACY
+mkdir -p "$SAFE/legacy"
+chmod 0777 "$SAFE/legacy"
+run_cutover "$WORK/stderr" stop-legacy "$SAFE/legacy"
+expect_rc "stop-legacy, lock directory writable by others" 1
+grep -q 'stop' "$SYSTEMCTL_LOG" && fail "the fork was stopped with an unsafe lock directory: $(cat "$SYSTEMCTL_LOG")"
+[ -e "$SAFE/legacy/deploy.lock" ] && fail "root created a lock in an unsafe directory"
+chmod 0700 "$SAFE/legacy"
+unset SHIM_LEGACY
 
 # --- 10. usage --------------------------------------------------------------
 info "10. usage"
