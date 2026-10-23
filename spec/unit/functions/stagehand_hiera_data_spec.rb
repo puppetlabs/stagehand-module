@@ -9,18 +9,14 @@ require 'digest'
 # values in plaintext, so every file it writes must be private to the account
 # that runs the lookup, whatever the process umask is.
 describe 'stagehand::hiera_data (last-good cache permissions)' do
-  let(:function_path) { File.expand_path('../../../lib/puppet/functions/stagehand/hiera_data.rb', __dir__) }
-
-  let(:function_class) do
+  let(:function) do
     klass = nil
     allow(Puppet::Functions).to receive(:create_function).and_wrap_original do |original, *args, &block|
       klass = original.call(*args, &block)
     end
-    Kernel.load(function_path)
-    klass
+    Kernel.load(File.expand_path('../../../lib/puppet/functions/stagehand/hiera_data.rb', __dir__))
+    klass.new(nil, nil)
   end
-
-  let(:function) { function_class.new(nil, nil) }
 
   let(:context) do
     instance_double(Puppet::Pops::Lookup::Context).tap do |ctx|
@@ -32,15 +28,15 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
   let(:level) { 'nodes/web01.example.com' }
   let(:secret_body) { JSON.generate([{ 'level' => level, 'key' => 'db::password', 'value' => 'hunter2-resolved' }]) }
 
+  let(:workdir) { Dir.mktmpdir('psh-hiera-spec') }
+
   around do |example|
-    Dir.mktmpdir('psh-hiera-spec') do |dir|
-      @workdir = dir
-      old_umask = File.umask(0o022)
-      begin
-        example.run
-      ensure
-        File.umask(old_umask)
-      end
+    old_umask = File.umask(0o022)
+    begin
+      example.run
+    ensure
+      File.umask(old_umask)
+      FileUtils.rm_rf(workdir)
     end
   end
 
@@ -49,7 +45,7 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
   end
 
   def cache_file(cache_dir)
-    File.join(cache_dir, Digest::SHA256.hexdigest(level) + '.json')
+    File.join(cache_dir, "#{Digest::SHA256.hexdigest(level)}.json")
   end
 
   def mode_of(path)
@@ -57,7 +53,7 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
   end
 
   context 'when a lookup succeeds under the common 0022 umask' do
-    let(:cache_dir) { File.join(@workdir, 'psh-hiera-cache') }
+    let(:cache_dir) { File.join(workdir, 'psh-hiera-cache') }
 
     before { allow(function).to receive(:fetch).and_return(secret_body) }
 
@@ -100,7 +96,7 @@ describe 'stagehand::hiera_data (last-good cache permissions)' do
   end
 
   context 'when the cache directory already exists' do
-    let(:cache_dir) { File.join(@workdir, 'existing-cache') }
+    let(:cache_dir) { File.join(workdir, 'existing-cache') }
 
     before do
       FileUtils.mkdir_p(cache_dir, mode: 0o750)
