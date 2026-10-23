@@ -15,6 +15,7 @@
   String[1]           $deploy_timeout,
   Integer[1]          $max_jobs,
   Array[String[1]]    $protected_environments,
+  Optional[String[1]] $ssh_config = undef,
 | -%>
 # Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
 # Configuration of the Stagehand deploy agent (mTLS deploy API for the Advanced Code Manager pack).
@@ -54,6 +55,10 @@ engine:
   name: '<%= $engine %>'
   command_path: '<%= $command_path.regsubst("'", "''", 'G') %>'
   config_path: '<%= $config_path.regsubst("'", "''", 'G') %>'
+<%- if $ssh_config =~ NotUndef { -%>
+  # git runs as `ssh -F <this file>`: host keys are pinned and no other ssh configuration is read.
+  ssh_config: '<%= $ssh_config.regsubst("'", "''", 'G') %>'
+<%- } -%>
 deploys:
   basedir: '<%= $basedir.regsubst("'", "''", 'G') %>'
   # Job records and the cross-process deploy lock live here (0700, the agent's user).

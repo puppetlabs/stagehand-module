@@ -411,6 +411,42 @@ class stagehand::webhook (
     require  => [File[$r10k_config], File[$package_file], User[$run_as]],
   }
 
+  # --- Git over SSH (D-03, MD-03): a dedicated file, not any user's. ---------
+  # The agent runs git as `ssh -F <ssh_config>`, so ssh reads this file and no
+  # other: nothing in a user's ssh directory or the system ssh_config can weaken
+  # the pin. The files belong to the agent user (ssh refuses a config owned by
+  # anyone else) and live in the agent's own configuration directory.
+  if $git_ssh_host =~ NotUndef {
+    $ssh_config      = "${config_dir}/ssh_config"
+    $ssh_known_hosts = "${config_dir}/known_hosts"
+
+    file { $ssh_config:
+      ensure  => file,
+      owner   => $run_as,
+      group   => 'puppet',
+      mode    => '0600',
+      content => epp('stagehand/webhook/ssh_config.epp', {
+        'identity_file'    => "${credentials}/deploy_key",
+        'known_hosts_file' => $ssh_known_hosts,
+      }),
+      require => File[$config_dir],
+    }
+
+    file { $ssh_known_hosts:
+      ensure  => file,
+      owner   => $run_as,
+      group   => 'puppet',
+      mode    => '0644',
+      content => "${git_ssh_known_host}\n",
+      require => File[$config_dir],
+    }
+
+    $ssh_files = [File[$ssh_config], File[$ssh_known_hosts]]
+  } else {
+    $ssh_config = undef
+    $ssh_files  = []
+  }
+
   # --- The agent's config: mTLS on this node's own Puppet identity. ---------
   $command_path = $engine ? {
     'g10k'  => $g10k_command_path,
@@ -446,6 +482,7 @@ class stagehand::webhook (
       'deploy_timeout'         => $deploy_timeout,
       'max_jobs'               => $max_jobs,
       'protected_environments' => $protected_environments,
+      'ssh_config'             => $ssh_config,
     }),
     require => [File[$config_dir], Package['stagehand-deploy-agent']],
   }
@@ -480,6 +517,7 @@ class stagehand::webhook (
       'run_as'           => $run_as,
       'server_key'       => "${ssldir}/private_keys/${certname}.pem",
       'read_write_paths' => $writable,
+      'deploy_key'       => $git_ssh_key,
     }),
     require => File[$dropin_dir],
     notify  => Exec['stagehand-deploy-agent-systemd-reload'],
@@ -494,10 +532,10 @@ class stagehand::webhook (
   service { 'stagehand-deploy-agent':
     ensure    => running,
     enable    => true,
-    subscribe => [File["${config_dir}/config.yml"], File[$dropin], Package['stagehand-deploy-agent']],
+    subscribe => [File["${config_dir}/config.yml"], File[$dropin], Package['stagehand-deploy-agent']] + $ssh_files,
     require   => [
       File[$basedir, $cachedir, $state_dir],
       Exec['stagehand-deploy-agent-systemd-reload'],
-    ],
+    ] + $ssh_files,
   }
 }

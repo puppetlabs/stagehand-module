@@ -2,6 +2,7 @@
   String[1]        $run_as,
   String[1]        $server_key,
   Array[String[1], 1] $read_write_paths,
+  Optional[String[1]] $deploy_key = undef,
 | -%>
 # Managed by Puppet (stagehand::webhook). Local edits are overwritten on the next agent run.
 # Node-specific overrides for the Stagehand deploy agent's packaged systemd unit.
@@ -14,6 +15,11 @@ User=<%= $run_as %>
 # ssl directory is not touched. Needs systemd 247 or later. The key is read once at
 # service start, so a renewed certificate needs a service restart.
 LoadCredential=server.key:<%= $server_key.regsubst('%', '%%', 'G') %>
+<%- if $deploy_key =~ NotUndef { -%>
+# The git deploy key, passed the same way (/run/credentials/stagehand-deploy-agent.service/deploy_key).
+# The ssh_config the agent hands to git points at that copy.
+LoadCredential=deploy_key:<%= $deploy_key.regsubst('%', '%%', 'G') %>
+<%- } -%>
 # The unit makes the file system read-only except for the paths listed. The empty line
 # clears the packaged defaults, the next line sets the real ones. Each directory must
 # exist before the service starts (the class creates them).
