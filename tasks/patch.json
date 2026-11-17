@@ -1,5 +1,5 @@
 {
-  "description": "Apply available OS package updates (all, or security-only) on a node, optionally reboot when required, then refresh the pcm_patch posture. The console reads the resulting posture via the pcm_patch fact on the next run.",
+  "description": "Apply available OS package updates (all, security-only, or a specific set of patch_ids) on a node, optionally reboot according to the reboot policy, then refresh the patchbot posture. The console reads the resulting posture via the patchbot fact on the next run.",
   "input_method": "environment",
   "parameters": {
     "console_url": {
@@ -11,14 +11,18 @@
       "type": "Optional[String[1]]"
     },
     "security_only": {
-      "description": "Apply only security updates when true; otherwise apply all available updates.",
+      "description": "Apply only security updates when true; otherwise apply all available updates. Ignored when patch_ids is set.",
       "type": "Boolean",
       "default": false
     },
+    "patch_ids": {
+      "description": "Install only these specific patch/package ids, as reported in the patchbot fact's packages[] array. Takes priority over security_only when set. Only packages that are already installed are upgraded; none is newly installed. Must match [A-Za-z0-9]([A-Za-z0-9._:+-]*[A-Za-z0-9._:+])? -- rejected otherwise, since these are used unquoted on a package-manager command line running as root: a leading '-' or embedded whitespace would be read as a flag, and a trailing '-' is apt's remove syntax (apt-get install foo- removes foo).",
+      "type": "Optional[Array[Pattern[/\\A[A-Za-z0-9](?:[A-Za-z0-9._:+-]*[A-Za-z0-9._:+])?\\z/]]]"
+    },
     "reboot": {
-      "description": "Reboot the node afterward if a reboot is required.",
-      "type": "Boolean",
-      "default": false
+      "description": "Reboot policy. never: do not reboot. if-needed: reboot only when the node reports a reboot is required; when it cannot tell, do not reboot. always: reboot every patched node. The legacy Boolean is still accepted (true means if-needed, false means never).",
+      "type": "Variant[Boolean, Enum['never', 'if-needed', 'always']]",
+      "default": "never"
     }
   }
 }

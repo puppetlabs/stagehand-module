@@ -1574,13 +1574,21 @@ Server-injected; unused by the patch itself.
 
 Data type: `Boolean`
 
-Apply only security updates when true; otherwise apply all available updates.
+Apply only security updates when true; otherwise apply all available updates. Ignored when patch_ids is set.
+
+##### `patch_ids`
+
+Data type: `Optional[Array[Pattern[/\A[A-Za-z0-9](?:[A-Za-z0-9._:+-]*[A-Za-z0-9._:+])?\z/]]]`
+
+Install only these specific patch/package ids, as reported in the patchbot fact's packages[] array. Takes priority over security_only when set. Only packages that are already installed are upgraded; none is newly installed. Must match [A-Za-z0-9]([A-Za-z0-9._:+-]*[A-Za-z0-9._:+])? -- rejected otherwise, since these are used unquoted on a package-manager command line running as root: a leading '-' or embedded whitespace would be read as a flag, and a trailing '-' is apt's remove syntax (apt-get install foo- removes foo).
 
 ##### `reboot`
 
-Data type: `Boolean`
+Data type: `Variant[Boolean, Enum['never', 'if-needed', 'always']]`
 
-Reboot the node afterward if a reboot is required.
+Reboot policy. never: do not reboot. if-needed: reboot only when the node reports a reboot is required; when it cannot tell, do not reboot. always: reboot every patched node. The legacy Boolean is still accepted (true means if-needed, false means never).
+
+Default value: `never`
 
 ### <a name="r10k_deploy"></a>`r10k_deploy`
 

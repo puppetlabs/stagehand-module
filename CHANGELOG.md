@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.1] - 2026-11-17
+
+- fix(tasks): patch accepts the reboot policies never, if-needed and always (legacy true and false still accepted), declares patch_ids, no longer needs jq on the target, decides reboot needed with the shared reboot rule, and reports reboot_policy, reboot_status, reboot_status_reason and rebooting
+- fix(tasks): patch refuses a patch_ids entry that ends in '-' (apt reads a trailing '-' as remove, so openssh-server- would remove the package), upgrades selected packages only when they are already installed (apt-get install --only-upgrade; matches dnf upgrade and yum update) and ends option parsing with -- before the ids
+
 ## [1.0.0] - 2026-08-25
 
 - feat(tasks): add read-only r10k detection, deploy-key import, multi-host SSH staging, and explicit SSH-server remediation for the Stagehand control-repository setup flow
