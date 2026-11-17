@@ -1,0 +1,1 @@
+# CONSTRUCTED, not captured: the real lab data never has a non-security package whose name prefixes a security one (curl and libcurl are both security). Layout copied from real dnf output. Scenario: curl has a pending NON-security update; curl-minimal has a SECURITY one.

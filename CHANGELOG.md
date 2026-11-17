@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-11-17
+
+- feat(facts): patchbot fact schema version 2 with a three-state reboot_status (required, not_required, unknown) and fixed reboot_status_reason codes; the boolean reboot_required is kept and is true only when the status is required; a node that cannot tell reports unknown, never "no". The contract is the patch fact schema document (patch-fact-schema) in the console repository.
+- fix(facts): the Windows fact and its refresh script keep counting past the 500-entry detail cap, so available, security and package_count stay exact on a node far behind and truncated is true when missing is shorter than the total (the refresh records missing_total and security_total in its cache); a cache written by an older refresh reports its listed count until the next refresh
+- test: the fact harness (tests/patchbot_fact_test.sh, needs GNU awk, exits 77 when it is missing) and the Windows pwsh test (tests/patchbot_reboot_test.ps1) live in tests/, never in facts.d (Facter runs every executable in facts.d); CI counts exit 77 from tests/*.sh as a skip
+
 ## [1.1.1] - 2026-11-17
 
 - fix(tasks): patch accepts the reboot policies never, if-needed and always (legacy true and false still accepted), declares patch_ids, no longer needs jq on the target, decides reboot needed with the shared reboot rule, and reports reboot_policy, reboot_status, reboot_status_reason and rebooting

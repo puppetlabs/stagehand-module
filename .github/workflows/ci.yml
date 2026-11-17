@@ -145,7 +145,14 @@ jobs:
           for t in tasks/*_test.sh tests/*.sh; do
             [ -f "$t" ] || continue
             echo "== $t =="
-            sh "$t" || status=1
+            rc=0
+            sh "$t" || rc=$?
+            # Exit 77 is a skip (the fact harness needs GNU awk and says so); any other non-zero exit fails the job.
+            if [ "$rc" -eq 77 ]; then
+              echo "SKIP: $t (exit 77)"
+            elif [ "$rc" -ne 0 ]; then
+              status=1
+            fi
           done
           exit "$status"
 

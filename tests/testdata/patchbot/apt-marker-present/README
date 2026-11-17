@@ -1,0 +1,5 @@
+The three apt-* cases share one recorded `apt-get -s dist-upgrade` (the Inst lines, from an ubuntu:24.04 container after
+`apt-get update`, 2026-11-17). They differ only in the files the harness creates for the two test-only overrides:
+  apt-marker-present    PATCHBOT_REBOOT_MARKER names an existing file
+  apt-marker-absent     the marker is absent and PATCHBOT_MARKER_WRITER names an executable
+  apt-no-marker-writer  neither exists: nothing on the node would ever write the marker

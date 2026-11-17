@@ -71,27 +71,73 @@ function Get-OsBuild {
     return "$major.$minor.$build.$ubr"
 }
 
-function Test-RebootPending {
-    # Four independent signals; any one of them means pending. Checked in
-    # cheapest-first order.
-    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { return $true }
-    if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { return $true }
-
-    $sm = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
-    if ($null -ne $sm -and $null -ne $sm.PendingFileRenameOperations -and $sm.PendingFileRenameOperations.Count -gt 0) { return $true }
-
-    # SCCM's own opinion, only when the client is actually installed.
-    if (Get-CimInstance -Namespace 'root\ccm\clientsdk' -ClassName 'CCM_ClientUtilities' -ErrorAction SilentlyContinue) {
-        $r = Invoke-CimMethod -Namespace 'root\ccm\clientsdk' -ClassName 'CCM_ClientUtilities' `
-                              -MethodName 'DetermineIfRebootPending' -ErrorAction SilentlyContinue
-        if ($null -ne $r -and ($r.RebootPending -eq $true -or $r.IsHardRebootPending -eq $true)) { return $true }
+# BEGIN reboot_status
+# Reboot answer, three states. Each probe answers yes, no or error, and an
+# error is never read as a no (D-09). The classification below is D-25: any yes
+# is required; the CBS and Windows Update probes both answering a definite no is
+# not required (the file-rename and SCCM probes only add a yes); otherwise
+# unknown with reason probes_failed.
+#
+# ASSUMED until a Windows host confirms it (RESEARCH A1): a missing registry key
+# raises ItemNotFoundException and a denied key raises another exception type,
+# as the filesystem provider does. Verified on the filesystem provider only.
+function Test-PatchbotProbe([scriptblock]$Probe) {
+    try {
+        if (& $Probe) { 'yes' } else { 'no' }
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        'no'
+    } catch {
+        'error'
     }
-    return $false
+}
+
+function Resolve-PatchbotRebootStatus([string]$Cbs, [string]$WindowsUpdate, [string]$FileRename, [string]$Sccm) {
+    if (($Cbs, $WindowsUpdate, $FileRename, $Sccm) -contains 'yes') {
+        return [pscustomobject]@{ Status = 'required'; Reason = 'pending_reboot_probe' }
+    }
+    if ($Cbs -eq 'no' -and $WindowsUpdate -eq 'no') {
+        return [pscustomobject]@{ Status = 'not_required'; Reason = 'probes_clear' }
+    }
+    return [pscustomobject]@{ Status = 'unknown'; Reason = 'probes_failed' }
+}
+# END reboot_status
+
+function Get-RebootStatus {
+    # Four independent signals; each is run through Test-PatchbotProbe with
+    # -ErrorAction Stop inside its scriptblock, so a probe that could not read
+    # the registry answers error and not no.
+    $cbs = Test-PatchbotProbe {
+        $null = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' -ErrorAction Stop
+        $true
+    }
+    $wu = Test-PatchbotProbe {
+        $null = Get-Item -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' -ErrorAction Stop
+        $true
+    }
+    $fileRename = Test-PatchbotProbe {
+        # GetValue returns a plain null when the value is absent, so an absent
+        # value is a no and only a failure to open the key is an error.
+        $key = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
+        $v = $key.GetValue('PendingFileRenameOperations')
+        ($null -ne $v) -and (@($v).Count -gt 0)
+    }
+
+    # SCCM's own opinion, only when the client is actually installed. A missing
+    # client is not applicable, not an error.
+    $sccm = 'absent'
+    if (Get-CimClass -Namespace 'root\ccm\clientsdk' -ClassName 'CCM_ClientUtilities' -ErrorAction SilentlyContinue) {
+        $sccm = Test-PatchbotProbe {
+            $r = Invoke-CimMethod -Namespace 'root\ccm\clientsdk' -ClassName 'CCM_ClientUtilities' `
+                                  -MethodName 'DetermineIfRebootPending' -ErrorAction Stop
+            ($null -ne $r) -and ($r.RebootPending -eq $true -or $r.IsHardRebootPending -eq $true)
+        }
+    }
+    return Resolve-PatchbotRebootStatus -Cbs $cbs -WindowsUpdate $wu -FileRename $fileRename -Sccm $sccm
 }
 
 # ---- fast path: always available, no network, no WUA -----------------------
 $osBuild = Get-OsBuild
-$reboot  = Test-RebootPending
+$reboot  = Get-RebootStatus
 
 # ---- cached path: whatever the last refresh managed to collect -------------
 $cache        = $null
@@ -130,12 +176,31 @@ if ($null -ne $cache) {
     if ($null -ne $cache.cve_ids_populated) { $cvePopulated = [bool]$cache.cve_ids_populated }
 }
 
-$securityCount = @($missing | Where-Object { $_.severity -and $_.severity -ne 'Unspecified' }).Count
+# The refresh caps the missing[] detail list but counts every update (missing_total, security_total), so the counts stay exact and
+# truncated says when the list is shorter than the total (the contract's "Cost and the cap"). A cache written before the totals
+# existed has only the capped list, so its listed count is all there is to report and truncated stays false until the next refresh.
+$availableCount = $missing.Count
+$securityCount  = @($missing | Where-Object { $_.severity -and $_.severity -ne 'Unspecified' }).Count
+if ($null -ne $cache) {
+    $t = 0
+    if ($null -ne $cache.missing_total -and [int]::TryParse([string]$cache.missing_total, [ref]$t) -and $t -ge $missing.Count) {
+        $availableCount = $t
+        $s = 0
+        if ($null -ne $cache.security_total -and [int]::TryParse([string]$cache.security_total, [ref]$s) -and $s -ge 0 -and $s -le $t) {
+            $securityCount = $s
+        }
+    }
+}
+$truncated = ($availableCount -gt $missing.Count)
 
 $payload = [ordered]@{
-    available       = $missing.Count
+    schema_version  = 2
+    available       = $availableCount
     security        = $securityCount
-    reboot_required = $reboot
+    # Kept for version 1 readers: true only when reboot_status is required.
+    reboot_required = ($reboot.Status -eq 'required')
+    reboot_status        = $reboot.Status
+    reboot_status_reason = $reboot.Reason
     last_checked    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     manager         = 'wua'
     os_build        = $osBuild
@@ -143,8 +208,8 @@ $payload = [ordered]@{
     missing         = $missing
     source          = $source
     wsus_server     = $wsus
-    package_count   = $missing.Count
-    truncated       = $false
+    package_count   = $availableCount
+    truncated       = $truncated
     # Staleness is reported, never hidden. A scan against a two-week-old view
     # of Windows Update is not evidence of anything, and the console's coverage
     # view exists to say so out loud.

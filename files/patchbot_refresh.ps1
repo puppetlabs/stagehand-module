@@ -37,10 +37,15 @@ $ProgressPreference    = 'SilentlyContinue'
 $CacheDir  = Join-Path $env:ProgramData 'PuppetLabs\patchbot'
 $CacheFile = Join-Path $CacheDir 'patch_cache.json'
 $TmpFile   = "$CacheFile.tmp"
-$MaxMissing = 500   # cap the detail array; counts stay exact
+$MaxMissing = 500   # cap the detail array; counts stay exact (missing_total, security_total)
+# The same environment override the Linux fact honours, for a node that genuinely needs more detail or for a test.
+$capEnv = 0
+if ([int]::TryParse([string]$env:PCM_PATCH_MAX_PACKAGES, [ref]$capEnv) -and $capEnv -gt 0) { $MaxMissing = $capEnv }
 
 $installedKbs   = New-Object System.Collections.Generic.HashSet[string]
 $missing        = @()
+$missingTotal   = 0        # every missing update, not just the listed ones
+$securityTotal  = 0        # of those, the ones with a severity other than Unspecified
 $source         = 'unknown'
 $wsusServer     = $null
 $scanError      = $null
@@ -97,10 +102,16 @@ try {
     # ---- missing: the network-dependent part ------------------------------
     $res = $searcher.Search("IsInstalled=0 and Type='Software' and IsHidden=0")
     $cveChecked = $true
-    $n = 0
     foreach ($u in $res.Updates) {
-        $n++
-        if ($n -gt $MaxMissing) { break }
+        # Every update is counted, so available and security stay exact on a node more updates behind than the cap; only the detail
+        # list below is capped (the contract: "the counts are always exact").
+        $missingTotal++
+
+        $sev = $null
+        try { if ($u.MsrcSeverity) { $sev = [string]$u.MsrcSeverity } } catch { }
+        if ($sev -and $sev -ne 'Unspecified') { $securityTotal++ }
+
+        if ($missing.Count -ge $MaxMissing) { continue }
 
         # IUpdate2::CveIDs. Documented since XP; in practice every scanner
         # correlates KB->CVE externally against MSRC instead, which suggests
@@ -114,9 +125,6 @@ try {
             }
         } catch { }
         if ($cves.Count -gt 0) { $cveSeen = $true }
-
-        $sev = $null
-        try { if ($u.MsrcSeverity) { $sev = [string]$u.MsrcSeverity } } catch { }
 
         $missing += [ordered]@{
             kbs      = (Get-KbList $u)
@@ -136,6 +144,8 @@ $payload = [ordered]@{
     generated_at      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     installed_kbs     = @($installedKbs | Sort-Object)
     missing           = $missing
+    missing_total     = $missingTotal
+    security_total    = $securityTotal
     source            = $source
     wsus_server       = $wsusServer
     cve_ids_populated = $(if ($cveChecked) { $cveSeen } else { $null })
