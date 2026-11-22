@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.3] - 2026-11-22
+
+- feat(tasks): stagehand::patch returns per-package results (result_version 1: name, arch, before, after, status), passes only installed packages to the package manager, and still prints its result line when the package manager fails (Puppet Stagehand 77.1, D-16)
+
 ## [1.1.2] - 2026-11-17
 
 - feat(facts): patchbot fact schema version 2 with a three-state reboot_status (required, not_required, unknown) and fixed reboot_status_reason codes; the boolean reboot_required is kept and is true only when the status is required; a node that cannot tell reports unknown, never "no". The contract is the patch fact schema document (patch-fact-schema) in the console repository.

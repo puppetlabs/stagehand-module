@@ -2,7 +2,9 @@
 # stagehand::patch — apply OS package updates (all or security-only) and reboot
 # according to the reboot policy (never, if-needed or always). Posture is
 # reported back through the patchbot fact; this task's own output also carries
-# the policy, the node's reboot status and whether a reboot was scheduled.
+# the policy, the node's reboot status and whether a reboot was scheduled. When
+# patch_ids is given the output also carries the per-package result contract
+# (result_version 1, docs/design/patch-task-result-schema.md, D-16).
 set -u
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -159,8 +161,174 @@ schedule_reboot() {
   fi
 }
 
+# Per-package result contract (77.1-02, D-16). Only when patch_ids is given: ask
+# the package database what is installed before the package-manager call, hand
+# the manager only the ids that are installed (one unknown name makes apt exit
+# 100 for the whole node), ask again afterwards, and report one entry per
+# requested package. The manager's own output stays in /dev/null and stdout stays
+# exactly one JSON line; reason is a fixed code, never command output.
+PATCH_RESULT_MAX_PACKAGES=500
+PM_FAILED=0
+RESULT_V1=0
+INSTALLED_IDS=""
+RESDIR=""
+PKG_JSON=""
+PKG_COUNT=0
+PKG_TRUNCATED="false"
+NL='
+'
+
+# json_str TEXT: TEXT as the inside of a JSON string. Backslash and double quote
+# are escaped and every control byte is dropped, so a node's package database
+# cannot break out of the line.
+json_str() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\000-\037'
+}
+
+# capture_versions MANAGER ID: one name|arch|version line per installed instance
+# of ID (several on a multi-arch or install-only package), nothing when ID is not
+# installed. apt: dpkg-query, keeping only status ii (an rc package, removed with
+# its configuration left behind, is not installed). dnf and yum: rpm -q, with the
+# epoch printed only when non-zero. Never fails the script: a tool that is
+# missing or a package that is absent both read as "not installed".
+capture_versions() {
+  case "$1" in
+    apt)
+      dpkg-query -W -f="\${Package}|\${Architecture}|\${Version}|\${db:Status-Abbrev}\\n" "$2" </dev/null 2>/dev/null \
+        | while IFS='|' read -r _cn _ca _cv _cs; do
+            case "$_cs" in
+              ii*) [ -n "$_cn" ] && [ -n "$_cv" ] && printf '%s|%s|%s\n' "$_cn" "$_ca" "$_cv" ;;
+            esac
+          done
+      ;;
+    dnf | yum)
+      rpm -q --qf '%{NAME}|%{ARCH}|%|EPOCH?{%{EPOCH}:}|%{VERSION}-%{RELEASE}\n' "$2" </dev/null 2>/dev/null \
+        | while IFS='|' read -r _cn _ca _cv _cx; do
+            [ -z "$_cx" ] && [ -n "$_cn" ] && [ -n "$_ca" ] && [ -n "$_cv" ] && printf '%s|%s|%s\n' "$_cn" "$_ca" "$_cv"
+          done
+      ;;
+  esac
+  return 0
+}
+
+# filter_installed MANAGER: sets INSTALLED_IDS (space separated, each id once, in
+# request order) to the ids of PATCH_IDS that are installed, and records the
+# before-versions of every id in $RESDIR (ids is the request order, b.N the
+# before lines of id number N).
+filter_installed() {
+  INSTALLED_IDS=""
+  _seen="|"
+  _idx=0
+  : > "$RESDIR/ids"
+  while IFS= read -r _fid; do
+    [ -n "$_fid" ] || continue
+    case "$_seen" in *"|$_fid|"*) continue ;; esac
+    _seen="${_seen}${_fid}|"
+    _idx=$((_idx + 1))
+    printf '%s\n' "$_fid" >> "$RESDIR/ids"
+    capture_versions "$1" "$_fid" > "$RESDIR/b.$_idx"
+    if [ -s "$RESDIR/b.$_idx" ]; then
+      INSTALLED_IDS="${INSTALLED_IDS}${INSTALLED_IDS:+ }${_fid}"
+    fi
+  done <<EOF_IDS
+$PATCH_IDS
+EOF_IDS
+}
+
+# versions_for LINES NAME ARCH: the versions listed in LINES (name|arch|version
+# per line) for that name and arch.
+versions_for() {
+  while IFS='|' read -r _vn _va _vv; do
+    if [ "$_vn" = "$2" ] && [ "$_va" = "$3" ]; then
+      printf '%s\n' "$_vv"
+    fi
+  done <<EOF_VERSIONS
+$1
+EOF_VERSIONS
+}
+
+# add_entry NAME ARCH BEFORE AFTER STATUS [REASON]: count one package entry and,
+# up to PATCH_RESULT_MAX_PACKAGES, append it to PKG_JSON. The count keeps going
+# past the cap so the line says how many were found.
+add_entry() {
+  PKG_COUNT=$((PKG_COUNT + 1))
+  if [ "$PKG_COUNT" -gt "$PATCH_RESULT_MAX_PACKAGES" ]; then
+    PKG_TRUNCATED="true"
+    return 0
+  fi
+  _entry=$(printf '{"name": "%s", "arch": "%s", "before": "%s", "after": "%s", "status": "%s"' \
+    "$(json_str "$1")" "$(json_str "$2")" "$(json_str "$3")" "$(json_str "$4")" "$5")
+  if [ -n "${6:-}" ]; then
+    _entry="${_entry}, \"reason\": \"$6\""
+  fi
+  PKG_JSON="${PKG_JSON}${PKG_JSON:+, }${_entry}}"
+}
+
+# build_package_results MANAGER: ask again after the package-manager call and
+# fill PKG_JSON, PKG_COUNT and PKG_TRUNCATED, one entry per requested id and
+# installed architecture. Per name and arch: before is the last version listed
+# before; after is the first version listed now that was not listed before (an
+# install-only package keeps its old versions), else the last one listed now.
+#   updated    a version appeared that was not there before
+#   unchanged  nothing new appeared and the manager did not fail
+#   failed     package_manager_error: the manager failed and nothing new
+#              appeared, or the package can no longer be read from the database
+#   skipped    not_installed: never handed to the manager
+build_package_results() {
+  _idx=0
+  while IFS= read -r _rid; do
+    _idx=$((_idx + 1))
+    if [ ! -s "$RESDIR/b.$_idx" ]; then
+      add_entry "$_rid" "" "" "" skipped not_installed
+      continue
+    fi
+    _blines=$(cat "$RESDIR/b.$_idx")
+    _alines=$(capture_versions "$1" "$_rid")
+    _keys="$NL"
+    while IFS='|' read -r _bn _ba _bv; do
+      case "$_keys" in *"$NL$_bn|$_ba$NL"*) continue ;; esac
+      _keys="${_keys}${_bn}|${_ba}${NL}"
+      _bset=$(versions_for "$_blines" "$_bn" "$_ba")
+      _aset=$(versions_for "$_alines" "$_bn" "$_ba")
+      _before=$(printf '%s\n' "$_bset" | sed -n '$p')
+      _after=$(printf '%s\n' "$_aset" | sed -n '$p')
+      _new=""
+      if [ -n "$_aset" ]; then
+        while IFS= read -r _av; do
+          case "$NL$_bset$NL" in
+            *"$NL$_av$NL"*) : ;;
+            *)
+              _new="$_av"
+              break
+              ;;
+          esac
+        done <<EOF_AFTER
+$_aset
+EOF_AFTER
+      fi
+      if [ -z "$_aset" ]; then
+        add_entry "$_bn" "$_ba" "$_before" "" failed package_manager_error
+      elif [ -n "$_new" ]; then
+        add_entry "$_bn" "$_ba" "$_before" "$_new" updated
+      elif [ "$PM_FAILED" = "1" ]; then
+        add_entry "$_bn" "$_ba" "$_before" "$_after" failed package_manager_error
+      else
+        add_entry "$_bn" "$_ba" "$_before" "$_after" unchanged
+      fi
+    done <<EOF_BEFORE
+$_blines
+EOF_BEFORE
+  done < "$RESDIR/ids"
+}
+
 APPLIED="unknown"
 MANAGER=""
+
+# Work files for the per-package result, removed on every exit path.
+if [ -n "$PATCH_IDS" ]; then
+  RESDIR=$(mktemp -d 2>/dev/null) || die "could not create a work directory"
+  trap '[ -z "$RESDIR" ] || rm -rf "$RESDIR"' EXIT
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -168,11 +336,18 @@ if command -v apt-get >/dev/null 2>&1; then
   MANAGER="apt"
   apt-get -qq update >/dev/null 2>&1 || die "apt-get update failed"
   if [ -n "$PATCH_IDS" ]; then
-    # shellcheck disable=SC2086
-    # --only-upgrade: upgrade packages that are already installed, never
-    # install new ones (matches dnf upgrade / yum update). -- ends option
-    # parsing so no id can be read as a flag.
-    apt-get -y install --only-upgrade -- $PATCH_IDS >/dev/null 2>&1 || die "apt install of selected patch_ids failed"
+    RESULT_V1=1
+    filter_installed apt
+    # Only ids that are installed reach apt: an unknown name makes apt-get exit
+    # 100 for the whole node. A failure is recorded, not fatal, so the result
+    # line below can still say what happened (the task then exits 1).
+    if [ -n "$INSTALLED_IDS" ]; then
+      # shellcheck disable=SC2086
+      # --only-upgrade: upgrade packages that are already installed, never
+      # install new ones (matches dnf upgrade / yum update). -- ends option
+      # parsing so no id can be read as a flag.
+      apt-get -y install --only-upgrade -- $INSTALLED_IDS >/dev/null 2>&1 || PM_FAILED=1
+    fi
     APPLIED="selected"
   elif [ "$SECURITY_ONLY" = "true" ]; then
     if command -v unattended-upgrade >/dev/null 2>&1; then
@@ -195,8 +370,14 @@ if command -v apt-get >/dev/null 2>&1; then
 elif command -v dnf >/dev/null 2>&1; then
   MANAGER="dnf"
   if [ -n "$PATCH_IDS" ]; then
-    # shellcheck disable=SC2086
-    dnf -y upgrade -- $PATCH_IDS >/dev/null 2>&1 || die "dnf upgrade of selected patch_ids failed"
+    RESULT_V1=1
+    filter_installed dnf
+    # Only installed ids reach dnf: an available-but-not-installed name makes
+    # dnf exit 1 ("No packages marked for upgrade"). -- ends option parsing.
+    if [ -n "$INSTALLED_IDS" ]; then
+      # shellcheck disable=SC2086
+      dnf -y upgrade -- $INSTALLED_IDS >/dev/null 2>&1 || PM_FAILED=1
+    fi
     APPLIED="selected"
   elif [ "$SECURITY_ONLY" = "true" ]; then
     dnf -y --security upgrade >/dev/null 2>&1 || die "dnf security upgrade failed"
@@ -209,8 +390,12 @@ elif command -v dnf >/dev/null 2>&1; then
 elif command -v yum >/dev/null 2>&1; then
   MANAGER="yum"
   if [ -n "$PATCH_IDS" ]; then
-    # shellcheck disable=SC2086
-    yum -y update -- $PATCH_IDS >/dev/null 2>&1 || die "yum update of selected patch_ids failed"
+    RESULT_V1=1
+    filter_installed yum
+    if [ -n "$INSTALLED_IDS" ]; then
+      # shellcheck disable=SC2086
+      yum -y update -- $INSTALLED_IDS >/dev/null 2>&1 || PM_FAILED=1
+    fi
     APPLIED="selected"
   elif [ "$SECURITY_ONLY" = "true" ]; then
     yum -y --security update >/dev/null 2>&1 || die "yum security update failed"
@@ -244,8 +429,24 @@ if [ -x /etc/puppetlabs/facter/facts.d/patchbot.sh ]; then
   /etc/puppetlabs/facter/facts.d/patchbot.sh >/dev/null 2>&1 || true
 fi
 
-printf '{"status": "patched", "applied": "%s", "reboot_policy": "%s", "reboot_status": "%s", "reboot_status_reason": "%s", "reboot_required": %s, "rebooting": %s}\n' \
-  "$APPLIED" "$POLICY" "$REBOOT_STATUS" "$REBOOT_REASON" "$REBOOT_REQUIRED" "$DO_REBOOT"
+if [ "$RESULT_V1" = "1" ]; then
+  build_package_results "$MANAGER"
+  # A failed package-manager call never reboots the node: the line below says
+  # what happened and the task exits 1, so Bolt records a failure.
+  RESULT_STATUS="patched"
+  if [ "$PM_FAILED" = "1" ]; then
+    RESULT_STATUS="failed"
+    DO_REBOOT="false"
+  fi
+  printf '{"status": "%s", "applied": "%s", "reboot_policy": "%s", "reboot_status": "%s", "reboot_status_reason": "%s", "reboot_required": %s, "rebooting": %s, "result_version": 1, "packages": [%s], "package_count": %s, "packages_truncated": %s}\n' \
+    "$RESULT_STATUS" "$APPLIED" "$POLICY" "$REBOOT_STATUS" "$REBOOT_REASON" "$REBOOT_REQUIRED" "$DO_REBOOT" "$PKG_JSON" "$PKG_COUNT" "$PKG_TRUNCATED"
+  if [ "$PM_FAILED" = "1" ]; then
+    exit 1
+  fi
+else
+  printf '{"status": "patched", "applied": "%s", "reboot_policy": "%s", "reboot_status": "%s", "reboot_status_reason": "%s", "reboot_required": %s, "rebooting": %s}\n' \
+    "$APPLIED" "$POLICY" "$REBOOT_STATUS" "$REBOOT_REASON" "$REBOOT_REQUIRED" "$DO_REBOOT"
+fi
 
 if [ "$DO_REBOOT" = "true" ]; then
   # Give Bolt time to collect the result before the link drops.
