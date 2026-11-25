@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-11-25
+
+- chore(release): one release line again. 1.1.1, 1.1.2 and 1.1.3 were cut from a branch that started before 1.1.0, so they do not contain `stagehand::webhook` or anything else listed under 1.1.0 below. 1.1.4 contains both: everything in 1.1.0 and everything in 1.1.1 to 1.1.3. Use 1.1.4 or later; a consumer on 1.1.3 that needs `stagehand::webhook`, or one on 1.1.0 that needs the patch task's per-package results, should move to 1.1.4.
+- fix(stagehand::platform_lock): on RedHat the lock step referred to `Exec['stagehand-platform-lock-dnf-versionlock']`, which `stagehand::platform_lock::rpm` never declares, so the catalog failed to compile on every EL target with "Could not find resource". It now refers to `File['/etc/dnf/plugins/versionlock.list']`, the file the DNF versionlock plugin reads. Found in a live EL9 run; the `compile.with_all_deps` spec does not catch this kind of broken cross-class reference, which is a known test gap.
+
+## [1.1.3] - 2026-11-22
+
+- feat(tasks): stagehand::patch returns per-package results (result_version 1: name, arch, before, after, status), passes only installed packages to the package manager, and still prints its result line when the package manager fails (Puppet Stagehand 77.1, D-16)
+
+## [1.1.2] - 2026-11-17
+
+- feat(facts): patchbot fact schema version 2 with a three-state reboot_status (required, not_required, unknown) and fixed reboot_status_reason codes; the boolean reboot_required is kept and is true only when the status is required; a node that cannot tell reports unknown, never "no". The contract is the patch fact schema document (patch-fact-schema) in the console repository.
+- fix(facts): the Windows fact and its refresh script keep counting past the 500-entry detail cap, so available, security and package_count stay exact on a node far behind and truncated is true when missing is shorter than the total (the refresh records missing_total and security_total in its cache); a cache written by an older refresh reports its listed count until the next refresh
+- test: the fact harness (tests/patchbot_fact_test.sh, needs GNU awk, exits 77 when it is missing) and the Windows pwsh test (tests/patchbot_reboot_test.ps1) live in tests/, never in facts.d (Facter runs every executable in facts.d); CI counts exit 77 from tests/*.sh as a skip
+
+## [1.1.1] - 2026-11-17
+
+- fix(tasks): patch accepts the reboot policies never, if-needed and always (legacy true and false still accepted), declares patch_ids, no longer needs jq on the target, decides reboot needed with the shared reboot rule, and reports reboot_policy, reboot_status, reboot_status_reason and rebooting
+- fix(tasks): patch refuses a patch_ids entry that ends in '-' (apt reads a trailing '-' as remove, so openssh-server- would remove the package), upgrades selected packages only when they are already installed (apt-get install --only-upgrade; matches dnf upgrade and yum update) and ends option parsing with -- before the ids
 ## [1.1.0] - 2026-10-22
 
 - feat(stagehand::webhook): the class is pinned to Stagehand deploy agent `v1.0.0`. `README.md`, `docs/stagehand-webhook.md` and the class `@example` carry the exact release URLs and sha256 digests (amd64 and arm64, deb and rpm), taken from the cosign-verified `checksums.txt` of that release. The agent's config key for the environments directory is `deploys.environments_dir`; the class parameter stays `basedir`.
