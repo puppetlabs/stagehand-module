@@ -47,7 +47,7 @@ Console deployment.
 * [`inspector_scan`](#inspector_scan): Run a Puppet Inspector profile against a node and POST normalized compliance.v1 results to the console. Self-contained (bundles the inspector
 * [`install_ansible`](#install_ansible): Ensures ansible-playbook is present on the node per install_method (auto/package/pip/pipx/wsl/skip). Standalone task for direct/manual use; s
 * [`openscap_scan`](#openscap_scan): Evaluate a node with OpenSCAP (SCAP Security Guide) and POST normalized compliance.v1 results to the console. Self-contained (bundles the sca
-* [`patch`](#patch): Apply available OS package updates (all, or security-only) on a node, optionally reboot when required, then refresh the pcm_patch posture. Th
+* [`patch`](#patch): Apply available OS package updates (all, security-only, or a specific set of patch_ids) on a node, optionally reboot according to the reboot
 * [`r10k_deploy`](#r10k_deploy): Deploy Puppet code for one environment via r10k — the console's on-demand poll (Core polls; PE deploys). Runs on the primary.
 * [`r10k_detect`](#r10k_detect): Read-only discovery of an existing r10k/Puppetfile configuration on the primary — reads r10k.yaml and every environment's Puppetfile content,
 * [`r10k_read_deploy_key`](#r10k_read_deploy_key): Reads an existing r10k/control-repo deploy key's PRIVATE key material off this host and returns it. SECURITY-SENSITIVE: only invoke on explic
@@ -1932,7 +1932,7 @@ Install openscap-scanner and scap-security-guide if missing.
 
 ### <a name="patch"></a>`patch`
 
-Apply available OS package updates (all, or security-only) on a node, optionally reboot when required, then refresh the pcm_patch posture. The console reads the resulting posture via the pcm_patch fact on the next run.
+Apply available OS package updates (all, security-only, or a specific set of patch_ids) on a node, optionally reboot according to the reboot policy, then refresh the patchbot posture. The console reads the resulting posture via the patchbot fact on the next run.
 
 **Supports noop?** false
 
@@ -1967,8 +1967,6 @@ Install only these specific patch/package ids, as reported in the patchbot fact'
 Data type: `Variant[Boolean, Enum['never', 'if-needed', 'always']]`
 
 Reboot policy. never: do not reboot. if-needed: reboot only when the node reports a reboot is required; when it cannot tell, do not reboot. always: reboot every patched node. The legacy Boolean is still accepted (true means if-needed, false means never).
-
-Default value: `never`
 
 ### <a name="r10k_deploy"></a>`r10k_deploy`
 
